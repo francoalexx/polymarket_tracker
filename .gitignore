@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.vite/
+coverage/
+npm-debug.log*
+dev-server.*.log
