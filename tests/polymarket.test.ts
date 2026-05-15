@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { analyzeCandidate, isBtcFiveMinuteTrade } from "../shared/candidateScanner";
 import { getActivityId, groupPositions, isShortTermCryptoMarket, isValidWallet, normalizeWallet } from "../shared/polymarket";
 import type { ActivityTrade, PositionLeg } from "../shared/types";
 
@@ -45,6 +46,85 @@ describe("position grouping", () => {
     expect(groups[0].totalCashPnl).toBe(10);
     expect(groups[0].dominantOutcome).toBe("Up");
     expect(groups[0].lastTradeTimestamp).toBe(300);
+  });
+});
+
+describe("candidate scanner", () => {
+  it("filters activity to BTC 5-minute markets", () => {
+    expect(isBtcFiveMinuteTrade(trade({ title: "Bitcoin Up or Down - May 9, 4:30AM-4:35AM ET", slug: "btc-updown-5m-1778315400" }))).toBe(true);
+    expect(isBtcFiveMinuteTrade(trade({ title: "Bitcoin Up or Down - May 9, 4:30AM-4:45AM ET", slug: "btc-updown-15m-1778315400" }))).toBe(false);
+    expect(isBtcFiveMinuteTrade(trade({ title: "Ethereum Up or Down - May 9, 4:30AM-4:35AM ET", slug: "eth-updown-5m-1778315400" }))).toBe(false);
+  });
+
+  it("scores wallets by market-level PnL, early entry, and one-sided behavior", () => {
+    const summary = analyzeCandidate(
+      {
+        proxyWallet: "0xcandidate",
+        userName: "candidate",
+        rank: "1",
+        pnl: 1000,
+        vol: 5000
+      },
+      [
+        trade({
+          conditionId: "0xwin",
+          slug: "btc-updown-5m-1000",
+          title: "Bitcoin Up or Down - Test A",
+          timestamp: 1020,
+          side: "BUY",
+          outcome: "Up",
+          size: 100,
+          usdcSize: 40
+        }),
+        trade({
+          conditionId: "0xloss",
+          slug: "btc-updown-5m-2000",
+          title: "Bitcoin Up or Down - Test B",
+          timestamp: 2170,
+          side: "BUY",
+          outcome: "Down",
+          size: 100,
+          usdcSize: 30
+        }),
+        trade({
+          conditionId: "0xhedged",
+          slug: "btc-updown-5m-3000",
+          title: "Bitcoin Up or Down - Test C",
+          timestamp: 3030,
+          side: "BUY",
+          outcome: "Up",
+          size: 10,
+          usdcSize: 4
+        }),
+        trade({
+          conditionId: "0xhedged",
+          slug: "btc-updown-5m-3000",
+          title: "Bitcoin Up or Down - Test C",
+          timestamp: 3040,
+          side: "BUY",
+          outcome: "Down",
+          size: 20,
+          usdcSize: 6
+        })
+      ],
+      new Map([
+        ["0xwin", "Up"],
+        ["0xloss", "Up"],
+        ["0xhedged", "Down"]
+      ]),
+      { earlyEntrySeconds: 90 }
+    );
+
+    expect(summary.totalMarkets).toBe(3);
+    expect(summary.wins).toBe(2);
+    expect(summary.losses).toBe(1);
+    expect(summary.winRate).toBeCloseTo(2 / 3);
+    expect(summary.totalPnl).toBeCloseTo(40);
+    expect(summary.earlyEntryRate).toBeCloseTo(2 / 3);
+    expect(summary.oneSidedRate).toBeCloseTo(2 / 3);
+    expect(summary.holdThroughRate).toBe(1);
+    expect(summary.copyabilityScore).toBeGreaterThan(60);
+    expect(summary.copyabilityScore).toBeLessThan(80);
   });
 });
 

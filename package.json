@@ -7,6 +7,7 @@
     "dev": "node scripts/dev.mjs",
     "server:dev": "tsx watch server/index.ts",
     "client:dev": "vite --host 127.0.0.1 --port 5173",
+    "scan:candidates": "tsx scripts/scanCandidates.ts",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run"
   },

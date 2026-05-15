@@ -1,7 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { Activity, AlertCircle, Bell, CircleDollarSign, Plus, Radio, Trash2, WifiOff } from "lucide-react";
-import { DEFAULT_WALLET } from "../shared/types";
+import { DEFAULT_TRACKED_WALLETS, DEFAULT_WALLET, YWS1_WALLET } from "../shared/types";
 import type { ActivityTrade, GroupedPosition, PriceUpdate, StatusPayload } from "../shared/types";
 import { isValidWallet, normalizeWallet } from "../shared/polymarket";
 import "./styles.css";
@@ -148,7 +148,7 @@ function App() {
               onClick={() => setSelectedWallet(wallet)}
               title={wallet}
             >
-              {wallet === DEFAULT_WALLET ? "Bonereaper" : shortWallet(wallet)}
+              {walletLabel(wallet)}
               <Trash2
                 size={14}
                 aria-label="Remove wallet"
@@ -334,9 +334,9 @@ function loadTargets(): string[] {
   try {
     const stored = JSON.parse(localStorage.getItem(TARGETS_KEY) ?? "[]") as string[];
     const valid = stored.map(normalizeWallet).filter(isValidWallet);
-    return valid.length ? Array.from(new Set([DEFAULT_WALLET, ...valid])) : [DEFAULT_WALLET];
+    return Array.from(new Set([...DEFAULT_TRACKED_WALLETS, ...valid]));
   } catch {
-    return [DEFAULT_WALLET];
+    return DEFAULT_TRACKED_WALLETS;
   }
 }
 
@@ -351,6 +351,12 @@ function activityKey(trade: ActivityTrade): string {
 
 function shortWallet(wallet: string): string {
   return `${wallet.slice(0, 6)}...${wallet.slice(-4)}`;
+}
+
+function walletLabel(wallet: string): string {
+  if (wallet === DEFAULT_WALLET) return "Bonereaper";
+  if (wallet === YWS1_WALLET) return "yws1";
+  return shortWallet(wallet);
 }
 
 function sumGroups(groups: GroupedPosition[], key: "totalCurrentValue" | "totalCashPnl"): number {
