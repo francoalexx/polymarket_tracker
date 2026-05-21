@@ -148,8 +148,11 @@ export function buildEntryTicket(input: {
   now: number;
   config: CopyTraderConfig;
 }): PreparedTradeTicket {
-  const limitPrice = roundToTick(Math.min(0.99, input.observedPrice + input.config.maxSlippageCents / 100), input.market.minTickSize);
-  const size = floorToPrecision(input.config.defaultEntrySpendUsdc / limitPrice, 4);
+  const limitPrice = Math.min(
+    0.99,
+    roundToTick(input.observedPrice + input.config.maxSlippageCents / 100, input.market.minTickSize)
+  );
+  const size = input.config.defaultEntrySpendUsdc / limitPrice;
 
   return ticket({
     ...input,
@@ -173,8 +176,11 @@ export function buildExitTicket(input: {
   now: number;
   config: CopyTraderConfig;
 }): PreparedTradeTicket {
-  const limitPrice = roundToTick(Math.max(0.01, input.observedPrice - input.config.maxSlippageCents / 100), input.market.minTickSize);
-  const size = round(Math.min(input.requestedShares, input.availableShares));
+  const limitPrice = Math.max(
+    0.01,
+    roundToTick(input.observedPrice - input.config.maxSlippageCents / 100, input.market.minTickSize)
+  );
+  const size = Math.min(input.requestedShares, input.availableShares);
 
   return ticket({
     ...input,
@@ -238,11 +244,6 @@ function activityId(trade: ActivityTrade): string {
 
 function roundToTick(value: number, tick: number): number {
   return round(Math.round(value / tick) * tick);
-}
-
-function floorToPrecision(value: number, precision: number): number {
-  const factor = 10 ** precision;
-  return Math.floor(value * factor) / factor;
 }
 
 function round(value: number): number {

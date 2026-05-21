@@ -304,7 +304,7 @@ describe("hybrid copy trader pure logic", () => {
     expect(entry.kind).toBe("entry");
     expect(entry.spendUsdc).toBe(10);
     expect(entry.limitPrice).toBe(0.59);
-    expect(entry.size).toBeCloseTo(16.9491, 4);
+    expect(entry.size).toBe(10 / 0.59);
 
     const exit = buildExitTicket({
       wallet: "0xcandidate",
@@ -312,8 +312,8 @@ describe("hybrid copy trader pure logic", () => {
       outcome: "Up",
       asset: "up-token",
       observedPrice: 0.54,
-      requestedShares: 30,
-      availableShares: 12,
+      requestedShares: 30.123456789,
+      availableShares: 12.987654321,
       candidateTradeId: "trade-2",
       now: 2010,
       config
@@ -321,7 +321,36 @@ describe("hybrid copy trader pure logic", () => {
 
     expect(exit.kind).toBe("exit");
     expect(exit.limitPrice).toBe(0.49);
-    expect(exit.size).toBe(12);
+    expect(exit.size).toBe(12.987654321);
+
+    const coarseTickMarket = { ...market, minTickSize: 0.05 };
+    const cappedEntry = buildEntryTicket({
+      wallet: "0xcandidate",
+      market: coarseTickMarket,
+      outcome: "Up",
+      asset: "up-token",
+      observedPrice: 0.96,
+      candidateTradeId: "trade-3",
+      now: 2010,
+      config
+    });
+    expect(cappedEntry.limitPrice).toBe(0.99);
+    expect(cappedEntry.size).toBe(10 / 0.99);
+
+    const flooredExit = buildExitTicket({
+      wallet: "0xcandidate",
+      market: coarseTickMarket,
+      outcome: "Up",
+      asset: "up-token",
+      observedPrice: 0.03,
+      requestedShares: 12.123456789,
+      availableShares: 30.987654321,
+      candidateTradeId: "trade-4",
+      now: 2010,
+      config
+    });
+    expect(flooredExit.limitPrice).toBe(0.01);
+    expect(flooredExit.size).toBe(12.123456789);
   });
 });
 
