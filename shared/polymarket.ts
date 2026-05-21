@@ -1,8 +1,9 @@
+import { isBtcShortTermTrade } from "./copyTrader";
 import type { ActivityTrade, GroupedPosition, PositionLeg } from "./types";
 
 const WALLET_RE = /^0x[a-fA-F0-9]{40}$/;
 const SHORT_TERM_RE = /\b(5|15)\s*(m|min|minute)s?\b|-(5m|15m)-/i;
-const CRYPTO_RE = /\b(bitcoin|btc|ethereum|eth|solana|sol)\b/i;
+const ETH_SOL_RE = /\b(ethereum|eth|solana|sol)\b/i;
 
 export function isValidWallet(value: string): boolean {
   return WALLET_RE.test(value.trim());
@@ -25,7 +26,7 @@ export function getActivityId(trade: ActivityTrade): string {
 
 export function isShortTermCryptoMarket(position: Pick<PositionLeg, "title" | "slug">): boolean {
   const haystack = `${position.title} ${position.slug}`;
-  return CRYPTO_RE.test(haystack) && SHORT_TERM_RE.test(haystack);
+  return isBtcShortTermTrade(position) || (ETH_SOL_RE.test(haystack) && SHORT_TERM_RE.test(haystack));
 }
 
 type GroupPositionsOptions = {

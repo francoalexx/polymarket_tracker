@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { analyzeCandidate, isBtcFiveMinuteTrade } from "../shared/candidateScanner";
+import {
+  buildEntryTicket,
+  buildExitTicket,
+  getLatencyMode,
+  isBtcShortTermTrade,
+  shouldSuppressRepeatSignal,
+  summarizeLiveWallet,
+  passesStrictHistory
+} from "../shared/copyTrader";
 import { getActivityId, groupPositions, isShortTermCryptoMarket, isValidWallet, normalizeWallet } from "../shared/polymarket";
+import type { CandidateSummary } from "../shared/candidateScanner";
 import type { ActivityTrade, PositionLeg } from "../shared/types";
+import type { CopyTraderConfig, MarketMetadata, SignalCooldownKey } from "../shared/types";
 
 describe("wallet helpers", () => {
   it("validates and normalizes wallet addresses", () => {
@@ -152,6 +163,195 @@ describe("candidate scanner", () => {
     expect(summary.copyabilityScore).toBeLessThan(80);
   });
 });
+
+describe("hybrid copy trader pure logic", () => {
+  const config: CopyTraderConfig = {
+    primaryMarketType: "5m",
+    fallbackMarketType: "15m",
+    latencyThresholdSeconds: 8,
+    activeWithinSeconds: 20 * 60,
+    earlyEntrySeconds: 90,
+    minLiveTradeUsdc: 5,
+    maxEntryPrice: 0.85,
+    repeatCooldownSeconds: 240,
+    defaultEntrySpendUsdc: 10,
+    maxSlippageCents: 5
+  };
+
+  it("classifies BTC 5m and BTC 15m trades without matching ETH", () => {
+    expect(isBtcShortTermTrade(trade({ slug: "btc-updown-5m-1778315400" }), "5m")).toBe(true);
+    expect(isBtcShortTermTrade(trade({ slug: "btc-updown-15m-1778315400" }), "15m")).toBe(true);
+    expect(isBtcShortTermTrade(trade({ slug: "btc-updown-15m-1778315400" }), "5m")).toBe(false);
+    expect(isBtcShortTermTrade(trade({ slug: "eth-updown-5m-1778315400", title: "Ethereum Up or Down" }), "5m")).toBe(false);
+  });
+
+  it("marks BTC 5m as degraded when median latency exceeds threshold", () => {
+    expect(getLatencyMode([{ latencySeconds: 3 }, { latencySeconds: 5 }, { latencySeconds: 7 }], config)).toEqual({
+      activeMarketType: "5m",
+      isDegraded: false,
+      medianLatencySeconds: 5
+    });
+    expect(getLatencyMode([{ latencySeconds: 9 }, { latencySeconds: 11 }, { latencySeconds: 20 }], config)).toEqual({
+      activeMarketType: "15m",
+      isDegraded: true,
+      medianLatencySeconds: 11
+    });
+  });
+
+  it("summarizes an early one-sided live wallet and rejects dust or late entries", () => {
+    const market: MarketMetadata = {
+      conditionId: "0xlive",
+      slug: "btc-updown-5m-1000",
+      title: "Bitcoin Up or Down",
+      marketType: "5m",
+      startTimestamp: 1000,
+      endTimestamp: 1300,
+      outcomes: [
+        { name: "Up", tokenId: "up-token", price: 0.54 },
+        { name: "Down", tokenId: "down-token", price: 0.46 }
+      ],
+      minTickSize: 0.01,
+      negRisk: false
+    };
+
+    const signal = summarizeLiveWallet(
+      "0xlivewallet00000000000000000000000000000000",
+      [
+        trade({
+          proxyWallet: "0xlivewallet00000000000000000000000000000000",
+          conditionId: "0xlive",
+          slug: market.slug,
+          timestamp: 1020,
+          side: "BUY",
+          outcome: "Up",
+          asset: "up-token",
+          size: 30,
+          usdcSize: 16.2,
+          price: 0.54
+        })
+      ],
+      market,
+      1040,
+      config
+    );
+
+    expect(signal?.recommendation).toBe("prepare_entry");
+    expect(signal?.firstEntrySeconds).toBe(20);
+    expect(signal?.isOneSided).toBe(true);
+
+    expect(
+      summarizeLiveWallet(
+        "0xdustwallet000000000000000000000000000000000",
+        [trade({ conditionId: "0xlive", slug: market.slug, timestamp: 1020, usdcSize: 1, price: 0.54 })],
+        market,
+        1040,
+        config
+      )
+    ).toBeUndefined();
+
+    expect(
+      summarizeLiveWallet(
+        "0xlatewallet000000000000000000000000000000000",
+        [trade({ conditionId: "0xlive", slug: market.slug, timestamp: 1210, usdcSize: 20, price: 0.54 })],
+        market,
+        1220,
+        config
+      )?.recommendation
+    ).toBe("watch");
+  });
+
+  it("applies strict historical promotion thresholds", () => {
+    const summary = candidateSummary({ totalMarkets: 20, totalPnl: 100, winRate: 0.6, oneSidedRate: 0.8 });
+    expect(passesStrictHistory(summary)).toBe(true);
+    expect(passesStrictHistory(candidateSummary({ totalMarkets: 19, totalPnl: 100, winRate: 0.6, oneSidedRate: 0.8 }))).toBe(false);
+    expect(passesStrictHistory(candidateSummary({ totalMarkets: 20, totalPnl: -1, winRate: 0.9, oneSidedRate: 0.9 }))).toBe(false);
+    expect(passesStrictHistory(candidateSummary({ totalMarkets: 20, totalPnl: 100, winRate: 0.59, oneSidedRate: 0.9 }))).toBe(false);
+    expect(passesStrictHistory(candidateSummary({ totalMarkets: 20, totalPnl: 100, winRate: 0.9, oneSidedRate: 0.79 }))).toBe(false);
+  });
+
+  it("suppresses repeat signals inside the cooldown window", () => {
+    const key: SignalCooldownKey = { wallet: "0xabc", conditionId: "0xmarket", kind: "entry" };
+    const seen = new Map<string, number>();
+    expect(shouldSuppressRepeatSignal(key, seen, 1000, config)).toBe(false);
+    expect(shouldSuppressRepeatSignal(key, seen, 1100, config)).toBe(true);
+    expect(shouldSuppressRepeatSignal(key, seen, 1300, config)).toBe(false);
+  });
+
+  it("builds entry and exit tickets with slippage, tick rounding, and balance caps", () => {
+    const market: MarketMetadata = {
+      conditionId: "0xticket",
+      slug: "btc-updown-5m-2000",
+      title: "Bitcoin Up or Down",
+      marketType: "5m",
+      startTimestamp: 2000,
+      endTimestamp: 2300,
+      outcomes: [{ name: "Up", tokenId: "up-token", price: 0.54 }],
+      minTickSize: 0.01,
+      negRisk: false
+    };
+
+    const entry = buildEntryTicket({
+      wallet: "0xcandidate",
+      market,
+      outcome: "Up",
+      asset: "up-token",
+      observedPrice: 0.54,
+      candidateTradeId: "trade-1",
+      now: 2010,
+      config
+    });
+
+    expect(entry.kind).toBe("entry");
+    expect(entry.spendUsdc).toBe(10);
+    expect(entry.limitPrice).toBe(0.59);
+    expect(entry.size).toBeCloseTo(16.9491, 4);
+
+    const exit = buildExitTicket({
+      wallet: "0xcandidate",
+      market,
+      outcome: "Up",
+      asset: "up-token",
+      observedPrice: 0.54,
+      requestedShares: 30,
+      availableShares: 12,
+      candidateTradeId: "trade-2",
+      now: 2010,
+      config
+    });
+
+    expect(exit.kind).toBe("exit");
+    expect(exit.limitPrice).toBe(0.49);
+    expect(exit.size).toBe(12);
+  });
+});
+
+function candidateSummary(overrides: Partial<CandidateSummary> = {}): CandidateSummary {
+  return {
+    proxyWallet: "0xcandidate",
+    userName: "candidate",
+    rank: "1",
+    leaderboardPnl: 0,
+    leaderboardVol: 0,
+    totalMarkets: 20,
+    totalTrades: 40,
+    wins: 12,
+    losses: 8,
+    breakeven: 0,
+    winRate: 0.6,
+    totalPnl: 100,
+    totalBuy: 300,
+    totalSell: 100,
+    settlementValue: 300,
+    roi: 0.33,
+    earlyEntryRate: 0.9,
+    oneSidedRate: 0.8,
+    holdThroughRate: 0.7,
+    averageFirstEntrySeconds: 40,
+    copyabilityScore: 80,
+    markets: [],
+    ...overrides
+  };
+}
 
 function position(overrides: Partial<PositionLeg> = {}): PositionLeg {
   return {

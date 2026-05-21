@@ -1,10 +1,12 @@
-import type { ActivityTrade, LeaderboardTrader } from "./types";
+import { isBtcShortTermTrade } from "./copyTrader";
+import type { ActivityTrade, LeaderboardTrader, MarketType } from "./types";
 
 export type { LeaderboardTrader } from "./types";
 
 export type CandidateOptions = {
   earlyEntrySeconds?: number;
   holdSellRatioThreshold?: number;
+  marketTypes?: MarketType[];
 };
 
 export type CandidateMarketSummary = {
@@ -52,13 +54,18 @@ export type CandidateSummary = {
   markets: CandidateMarketSummary[];
 };
 
-const BTC_RE = /\b(bitcoin|btc)\b/i;
-const FIVE_MINUTE_RE = /\b5\s*(m|min|minute)s?\b|-(5m)-/i;
 const EPSILON = 1e-6;
 
 export function isBtcFiveMinuteTrade(trade: Pick<ActivityTrade, "title" | "slug">): boolean {
-  const haystack = `${trade.title} ${trade.slug}`;
-  return BTC_RE.test(haystack) && FIVE_MINUTE_RE.test(haystack);
+  return isBtcShortTermTrade(trade, "5m");
+}
+
+export function isBtcFifteenMinuteTrade(trade: Pick<ActivityTrade, "title" | "slug">): boolean {
+  return isBtcShortTermTrade(trade, "15m");
+}
+
+export function isBtcShortTermHistoryTrade(trade: Pick<ActivityTrade, "title" | "slug">): boolean {
+  return isBtcShortTermTrade(trade);
 }
 
 export function analyzeCandidate(
@@ -69,9 +76,10 @@ export function analyzeCandidate(
 ): CandidateSummary {
   const earlyEntrySeconds = options.earlyEntrySeconds ?? 90;
   const holdSellRatioThreshold = options.holdSellRatioThreshold ?? 0.1;
+  const marketTypes = options.marketTypes ?? ["5m"];
   const grouped = new Map<string, ActivityTrade[]>();
 
-  for (const trade of activity.filter(isBtcFiveMinuteTrade)) {
+  for (const trade of activity.filter((item) => marketTypes.some((marketType) => isBtcShortTermTrade(item, marketType)))) {
     const trades = grouped.get(trade.conditionId) ?? [];
     trades.push(trade);
     grouped.set(trade.conditionId, trades);

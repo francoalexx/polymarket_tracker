@@ -126,3 +126,133 @@ export type ErrorPayload = {
   message: string;
   receivedAt: number;
 };
+
+export type MarketType = "5m" | "15m";
+
+export type CopyTraderConfig = {
+  primaryMarketType: MarketType;
+  fallbackMarketType: MarketType;
+  latencyThresholdSeconds: number;
+  activeWithinSeconds: number;
+  earlyEntrySeconds: number;
+  minLiveTradeUsdc: number;
+  maxEntryPrice: number;
+  repeatCooldownSeconds: number;
+  defaultEntrySpendUsdc: number;
+  maxSlippageCents: number;
+};
+
+export type MarketOutcomeMetadata = {
+  name: string;
+  tokenId: string;
+  price?: number;
+};
+
+export type MarketMetadata = {
+  conditionId: string;
+  slug: string;
+  title: string;
+  marketType: MarketType;
+  startTimestamp: number;
+  endTimestamp: number;
+  outcomes: MarketOutcomeMetadata[];
+  minTickSize: number;
+  negRisk: boolean;
+};
+
+export type SignalRecommendation = "watch" | "prepare_entry" | "prepare_exit" | "latency_degraded";
+export type SignalSource = "leaderboard" | "live" | "both";
+
+export type LiveWalletSignal = {
+  wallet: string;
+  name?: string;
+  source: SignalSource;
+  market: MarketMetadata;
+  outcome: string;
+  asset: string;
+  side: "BUY" | "SELL";
+  firstEntrySeconds: number;
+  latestTradeTimestamp: number;
+  latestTradeAgeSeconds: number;
+  detectedAt: number;
+  latencySeconds: number;
+  isOneSided: boolean;
+  liveTradeUsdc: number;
+  observedPrice: number;
+  recommendation: SignalRecommendation;
+  candidateTradeId: string;
+  reason: string;
+};
+
+export type LatencySample = {
+  source?: string;
+  marketType?: MarketType;
+  latencySeconds: number;
+  tradeTimestamp?: number;
+  receivedAt?: number;
+};
+
+export type LatencyMode = {
+  activeMarketType: MarketType;
+  isDegraded: boolean;
+  medianLatencySeconds: number;
+};
+
+export type SignalCooldownKey = {
+  wallet: string;
+  conditionId: string;
+  kind: "entry" | "exit";
+};
+
+export type PreparedTradeTicket = {
+  id: string;
+  kind: "entry" | "exit";
+  status: "pending" | "confirmed" | "submitted" | "cancelled" | "rejected";
+  wallet: string;
+  market: MarketMetadata;
+  outcome: string;
+  asset: string;
+  observedPrice: number;
+  limitPrice: number;
+  size: number;
+  spendUsdc?: number;
+  availableShares?: number;
+  candidateTradeId: string;
+  reason: string;
+  createdAt: number;
+  expiresAt: number;
+};
+
+export type CandidateFeedItem = {
+  wallet: string;
+  name?: string;
+  source: SignalSource;
+  marketType: MarketType;
+  outcome: string;
+  recommendation: SignalRecommendation;
+  score: number;
+  lastTradeAgeSeconds: number;
+  latencySeconds: number;
+  strictPass: boolean;
+  reason: string;
+  signal: LiveWalletSignal;
+};
+
+export type ExecutionLogEntry = {
+  id: string;
+  ticketId: string;
+  status: "dry_run" | "submitted" | "rejected" | "error";
+  message: string;
+  response?: unknown;
+  createdAt: number;
+};
+
+export type ScannerSnapshot = {
+  status: "starting" | "live" | "stale" | "error";
+  message: string;
+  receivedAt: number;
+  latency: LatencyMode;
+  candidates: CandidateFeedItem[];
+  tickets: PreparedTradeTicket[];
+  executions: ExecutionLogEntry[];
+};
