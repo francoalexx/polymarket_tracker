@@ -96,6 +96,7 @@ export type GroupedPosition = {
   netSharesByOutcome: Record<string, number>;
   dominantOutcome: string;
   isShortTermCrypto: boolean;
+  isPending: boolean;
   lastTradeTimestamp?: number;
 };
 

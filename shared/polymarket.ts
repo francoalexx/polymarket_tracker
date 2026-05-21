@@ -28,7 +28,15 @@ export function isShortTermCryptoMarket(position: Pick<PositionLeg, "title" | "s
   return CRYPTO_RE.test(haystack) && SHORT_TERM_RE.test(haystack);
 }
 
-export function groupPositions(positions: PositionLeg[], activity: ActivityTrade[] = []): GroupedPosition[] {
+type GroupPositionsOptions = {
+  pendingTrades?: ActivityTrade[];
+};
+
+export function groupPositions(
+  positions: PositionLeg[],
+  activity: ActivityTrade[] = [],
+  options: GroupPositionsOptions = {}
+): GroupedPosition[] {
   const latestActivityByCondition = new Map<string, number>();
 
   for (const trade of activity) {
@@ -37,15 +45,26 @@ export function groupPositions(positions: PositionLeg[], activity: ActivityTrade
   }
 
   const grouped = new Map<string, PositionLeg[]>();
+  const realConditionIds = new Set(positions.map((position) => position.conditionId));
+
   for (const position of positions) {
     const existing = grouped.get(position.conditionId) ?? [];
     existing.push(position);
     grouped.set(position.conditionId, existing);
   }
 
+  for (const pending of options.pendingTrades ?? []) {
+    if (realConditionIds.has(pending.conditionId) || pending.side !== "BUY") continue;
+
+    const existing = grouped.get(pending.conditionId) ?? [];
+    existing.push(positionFromTrade(pending));
+    grouped.set(pending.conditionId, existing);
+  }
+
   return Array.from(grouped.entries())
     .map(([conditionId, legs]) => {
       const [first] = legs;
+      const isPending = legs.every((leg) => leg.proxyWallet === "pending-activity");
       const netSharesByOutcome = legs.reduce<Record<string, number>>((acc, leg) => {
         acc[leg.outcome] = (acc[leg.outcome] ?? 0) + Number(leg.size || 0);
         return acc;
@@ -69,6 +88,7 @@ export function groupPositions(positions: PositionLeg[], activity: ActivityTrade
         netSharesByOutcome,
         dominantOutcome,
         isShortTermCrypto: legs.some(isShortTermCryptoMarket),
+        isPending,
         lastTradeTimestamp: latestActivityByCondition.get(conditionId)
       };
     })
@@ -76,6 +96,37 @@ export function groupPositions(positions: PositionLeg[], activity: ActivityTrade
       if (a.isShortTermCrypto !== b.isShortTermCrypto) return a.isShortTermCrypto ? -1 : 1;
       return b.totalCurrentValue - a.totalCurrentValue;
     });
+}
+
+function positionFromTrade(trade: ActivityTrade): PositionLeg {
+  return {
+    proxyWallet: "pending-activity",
+    asset: trade.asset,
+    conditionId: trade.conditionId,
+    size: trade.size,
+    avgPrice: trade.price,
+    initialValue: trade.usdcSize,
+    currentValue: trade.usdcSize,
+    cashPnl: 0,
+    percentPnl: 0,
+    totalBought: trade.size,
+    realizedPnl: 0,
+    percentRealizedPnl: 0,
+    curPrice: trade.price,
+    redeemable: false,
+    mergeable: false,
+    title: trade.title,
+    slug: trade.slug,
+    icon: trade.icon,
+    eventId: "",
+    eventSlug: trade.eventSlug,
+    outcome: trade.outcome,
+    outcomeIndex: trade.outcomeIndex,
+    oppositeOutcome: "",
+    oppositeAsset: "",
+    endDate: "",
+    negativeRisk: false
+  };
 }
 
 function sum<T extends Record<string, unknown>>(items: T[], key: keyof T): number {

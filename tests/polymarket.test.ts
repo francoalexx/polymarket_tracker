@@ -47,6 +47,31 @@ describe("position grouping", () => {
     expect(groups[0].dominantOutcome).toBe("Up");
     expect(groups[0].lastTradeTimestamp).toBe(300);
   });
+
+  it("creates pending groups from fresh activity before positions catch up", () => {
+    const fresh = trade({ conditionId: "0xfresh", outcome: "Down", asset: "down-asset", size: 25, usdcSize: 9.75, price: 0.39 });
+
+    const groups = groupPositions([], [fresh], { pendingTrades: [fresh] });
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].conditionId).toBe("0xfresh");
+    expect(groups[0].isPending).toBe(true);
+    expect(groups[0].dominantOutcome).toBe("Down");
+    expect(groups[0].totalShares).toBe(25);
+    expect(groups[0].totalCurrentValue).toBe(9.75);
+    expect(groups[0].lastTradeTimestamp).toBe(fresh.timestamp);
+  });
+
+  it("skips pending activity groups once a real position exists", () => {
+    const fresh = trade({ conditionId: "0xfresh", outcome: "Down", asset: "down-asset" });
+    const real = position({ conditionId: "0xfresh", outcome: "Down", asset: "down-asset", currentValue: 12 });
+
+    const groups = groupPositions([real], [fresh], { pendingTrades: [fresh] });
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].isPending).toBe(false);
+    expect(groups[0].totalCurrentValue).toBe(12);
+  });
 });
 
 describe("candidate scanner", () => {

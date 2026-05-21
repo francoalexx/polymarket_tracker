@@ -273,6 +273,14 @@ tbody tr.pinned {
   background: rgba(44, 91, 79, 0.18);
 }
 
+tbody tr.pending {
+  background: rgba(255, 198, 109, 0.1);
+}
+
+tbody tr.pinned.pending {
+  background: linear-gradient(90deg, rgba(255, 198, 109, 0.13), rgba(44, 91, 79, 0.18));
+}
+
 .market-cell {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr);

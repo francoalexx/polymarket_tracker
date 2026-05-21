@@ -8,18 +8,26 @@ const MARKET_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const ACTIVITY_MS = 1000;
 const POSITIONS_MS = 3000;
 const STALE_MS = 10000;
+const PENDING_TRADE_TTL_MS = 15000;
+const BURST_POSITIONS_MS = 400;
+const BURST_POSITIONS_POLLS = 8;
 
 export class StreamSession {
   private readonly client = new PolymarketClient();
   private readonly seenActivity = new Set<string>();
+  private readonly pendingTrades = new Map<string, { trade: ActivityTrade; receivedAt: number }>();
   private activity: ActivityTrade[] = [];
   private positions: PositionLeg[] = [];
   private activityTimer?: NodeJS.Timeout;
   private positionsTimer?: NodeJS.Timeout;
   private staleTimer?: NodeJS.Timeout;
+  private burstTimer?: NodeJS.Timeout;
   private ws?: WebSocket;
   private closed = false;
   private lastPositionsAt = 0;
+  private burstPollsRemaining = 0;
+  private positionsInFlight = false;
+  private queuedPositionsPoll = false;
 
   constructor(
     private readonly wallet: string,
@@ -29,10 +37,10 @@ export class StreamSession {
   start(): void {
     this.send("status", status("connecting", "Connecting to Polymarket data streams"));
     void this.pollActivity(true);
-    void this.pollPositions();
+    this.requestPositionsPoll();
 
     this.activityTimer = setInterval(() => void this.pollActivity(false), ACTIVITY_MS);
-    this.positionsTimer = setInterval(() => void this.pollPositions(), POSITIONS_MS);
+    this.positionsTimer = setInterval(() => this.requestPositionsPoll(), POSITIONS_MS);
     this.staleTimer = setInterval(() => this.checkStaleness(), 1000);
   }
 
@@ -41,24 +49,34 @@ export class StreamSession {
     if (this.activityTimer) clearInterval(this.activityTimer);
     if (this.positionsTimer) clearInterval(this.positionsTimer);
     if (this.staleTimer) clearInterval(this.staleTimer);
+    if (this.burstTimer) clearInterval(this.burstTimer);
     this.ws?.close();
     this.send("status", status("closed", "Stream closed"));
   }
 
+  private requestPositionsPoll(): void {
+    if (this.closed) return;
+
+    if (this.positionsInFlight) {
+      this.queuedPositionsPoll = true;
+      return;
+    }
+
+    void this.pollPositions();
+  }
+
   private async pollPositions(): Promise<void> {
+    this.positionsInFlight = true;
+
     try {
       const positions = await this.client.getPositions(this.wallet);
       if (this.closed) return;
 
       this.positions = positions;
       this.lastPositionsAt = Date.now();
+      this.prunePendingTrades();
 
-      this.send("positions_snapshot", {
-        wallet: this.wallet,
-        receivedAt: this.lastPositionsAt,
-        groups: groupPositions(this.positions, this.activity),
-        rawCount: this.positions.length
-      });
+      this.sendPositionsSnapshot();
 
       for (const position of positions) {
         this.send("price_update", {
@@ -69,10 +87,16 @@ export class StreamSession {
         } satisfies PriceUpdate);
       }
 
-      this.refreshMarketSocket(positions.map((position) => position.asset));
+      this.refreshMarketSocket(this.subscribedAssets());
       this.send("status", status("live", "Live"));
     } catch (error) {
       this.reportError(error);
+    } finally {
+      this.positionsInFlight = false;
+      if (this.queuedPositionsPoll && !this.closed) {
+        this.queuedPositionsPoll = false;
+        this.requestPositionsPoll();
+      }
     }
   }
 
@@ -95,6 +119,11 @@ export class StreamSession {
       this.activity = newestFirst.slice(0, 250);
 
       if (fresh.length > 0) {
+        this.trackPendingTrades(fresh);
+        this.sendPositionsSnapshot();
+        this.refreshMarketSocket(this.subscribedAssets());
+        this.scheduleBurstPositions();
+
         this.send("activity_delta", {
           wallet: this.wallet,
           receivedAt: Date.now(),
@@ -104,6 +133,71 @@ export class StreamSession {
     } catch (error) {
       this.reportError(error);
     }
+  }
+
+  private sendPositionsSnapshot(): void {
+    this.prunePendingTrades();
+    this.send("positions_snapshot", {
+      wallet: this.wallet,
+      receivedAt: Date.now(),
+      groups: groupPositions(this.positions, this.activity, { pendingTrades: this.pendingActivity() }),
+      rawCount: this.positions.length
+    });
+  }
+
+  private trackPendingTrades(trades: ActivityTrade[]): void {
+    const receivedAt = Date.now();
+
+    for (const trade of trades) {
+      if (trade.side !== "BUY") continue;
+
+      this.pendingTrades.set(getActivityId(trade), { trade, receivedAt });
+      this.send("price_update", {
+        asset: trade.asset,
+        price: Number(trade.price),
+        receivedAt,
+        source: "positions"
+      } satisfies PriceUpdate);
+    }
+
+    this.prunePendingTrades();
+  }
+
+  private pendingActivity(): ActivityTrade[] {
+    return Array.from(this.pendingTrades.values()).map(({ trade }) => trade);
+  }
+
+  private prunePendingTrades(): void {
+    const positionConditionIds = new Set(this.positions.map((position) => position.conditionId));
+    const now = Date.now();
+
+    for (const [id, pending] of this.pendingTrades) {
+      if (positionConditionIds.has(pending.trade.conditionId) || now - pending.receivedAt > PENDING_TRADE_TTL_MS) {
+        this.pendingTrades.delete(id);
+      }
+    }
+  }
+
+  private subscribedAssets(): string[] {
+    return [...this.positions.map((position) => position.asset), ...this.pendingActivity().map((trade) => trade.asset)];
+  }
+
+  private scheduleBurstPositions(): void {
+    this.burstPollsRemaining = Math.max(this.burstPollsRemaining, BURST_POSITIONS_POLLS);
+    this.requestPositionsPoll();
+
+    if (this.burstTimer) return;
+
+    this.burstTimer = setInterval(() => {
+      if (this.closed || this.burstPollsRemaining <= 0) {
+        if (this.burstTimer) clearInterval(this.burstTimer);
+        this.burstTimer = undefined;
+        return;
+      }
+
+      this.burstPollsRemaining -= 1;
+      this.requestPositionsPoll();
+    }, BURST_POSITIONS_MS);
   }
 
   private refreshMarketSocket(assets: string[]): void {

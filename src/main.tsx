@@ -276,13 +276,13 @@ function PositionTable({
             const open = expanded.has(group.conditionId);
             return (
               <React.Fragment key={group.conditionId}>
-                <tr className={group.isShortTermCrypto ? "pinned" : ""} onClick={() => onToggle(group.conditionId)}>
+                <tr className={rowClassName(group)} onClick={() => onToggle(group.conditionId)}>
                   <td>
                     <div className="market-cell">
                       <img src={group.icon} alt="" />
                       <div>
                         <strong>{group.title}</strong>
-                        <span>{group.isShortTermCrypto ? "Pinned crypto" : group.slug}</span>
+                        <span>{positionSubtitle(group)}</span>
                       </div>
                     </div>
                   </td>
@@ -328,6 +328,16 @@ function Metric({ icon, label, value, tone }: { icon?: React.ReactNode; label: s
 
 function EmptyState({ text }: { text: string }) {
   return <div className="empty-state">{text}</div>;
+}
+
+function rowClassName(group: GroupedPosition): string {
+  return [group.isShortTermCrypto ? "pinned" : "", group.isPending ? "pending" : ""].filter(Boolean).join(" ");
+}
+
+function positionSubtitle(group: GroupedPosition): string {
+  if (group.isPending) return "Syncing from latest trade";
+  if (group.isShortTermCrypto) return "Pinned crypto";
+  return group.slug;
 }
 
 function loadTargets(): string[] {
