@@ -242,7 +242,16 @@ describe("hybrid copy trader pure logic", () => {
     expect(
       summarizeLiveWallet(
         "0xdustwallet000000000000000000000000000000000",
-        [trade({ conditionId: "0xlive", slug: market.slug, timestamp: 1020, usdcSize: 1, price: 0.54 })],
+        [
+          trade({
+            proxyWallet: "0xdustwallet000000000000000000000000000000000",
+            conditionId: "0xlive",
+            slug: market.slug,
+            timestamp: 1020,
+            usdcSize: 1,
+            price: 0.54
+          })
+        ],
         market,
         1040,
         config
@@ -252,12 +261,91 @@ describe("hybrid copy trader pure logic", () => {
     expect(
       summarizeLiveWallet(
         "0xlatewallet000000000000000000000000000000000",
-        [trade({ conditionId: "0xlive", slug: market.slug, timestamp: 1210, usdcSize: 20, price: 0.54 })],
+        [
+          trade({
+            proxyWallet: "0xlatewallet000000000000000000000000000000000",
+            conditionId: "0xlive",
+            slug: market.slug,
+            timestamp: 1210,
+            usdcSize: 20,
+            price: 0.54
+          })
+        ],
         market,
         1220,
         config
       )?.recommendation
     ).toBe("watch");
+  });
+
+  it("summarizes live wallet activity using only the requested wallet", () => {
+    const market: MarketMetadata = {
+      conditionId: "0xshared",
+      slug: "btc-updown-5m-1500",
+      title: "Bitcoin Up or Down",
+      marketType: "5m",
+      startTimestamp: 1500,
+      endTimestamp: 1800,
+      outcomes: [
+        { name: "Up", tokenId: "up-token", price: 0.52 },
+        { name: "Down", tokenId: "down-token", price: 0.48 }
+      ],
+      minTickSize: 0.01,
+      negRisk: false
+    };
+
+    const signal = summarizeLiveWallet(
+      "0xcasewallet00000000000000000000000000000000",
+      [
+        trade({
+          proxyWallet: "0xotherwallet0000000000000000000000000000000",
+          conditionId: "0xshared",
+          slug: market.slug,
+          timestamp: 1510,
+          side: "BUY",
+          outcome: "Down",
+          asset: "down-token",
+          size: 50,
+          usdcSize: 24,
+          price: 0.48
+        }),
+        trade({
+          proxyWallet: "0xCASEWALLET00000000000000000000000000000000",
+          conditionId: "0xshared",
+          slug: market.slug,
+          timestamp: 1520,
+          side: "BUY",
+          outcome: "Up",
+          asset: "up-token",
+          size: 20,
+          usdcSize: 10.4,
+          price: 0.52
+        }),
+        trade({
+          proxyWallet: "0xotherwallet0000000000000000000000000000000",
+          conditionId: "0xshared",
+          slug: market.slug,
+          timestamp: 1530,
+          side: "SELL",
+          outcome: "Down",
+          asset: "down-token",
+          size: 10,
+          usdcSize: 5,
+          price: 0.5
+        })
+      ],
+      market,
+      1540,
+      config
+    );
+
+    expect(signal?.wallet).toBe("0xcasewallet00000000000000000000000000000000");
+    expect(signal?.side).toBe("BUY");
+    expect(signal?.outcome).toBe("Up");
+    expect(signal?.asset).toBe("up-token");
+    expect(signal?.firstEntrySeconds).toBe(20);
+    expect(signal?.latestTradeTimestamp).toBe(1520);
+    expect(signal?.liveTradeUsdc).toBe(10.4);
   });
 
   it("applies strict historical promotion thresholds", () => {
@@ -334,8 +422,8 @@ describe("hybrid copy trader pure logic", () => {
       now: 2010,
       config
     });
-    expect(cappedEntry.limitPrice).toBe(0.99);
-    expect(cappedEntry.size).toBe(10 / 0.99);
+    expect(cappedEntry.limitPrice).toBe(0.95);
+    expect(cappedEntry.size).toBe(10 / 0.95);
 
     const flooredExit = buildExitTicket({
       wallet: "0xcandidate",
@@ -349,7 +437,7 @@ describe("hybrid copy trader pure logic", () => {
       now: 2010,
       config
     });
-    expect(flooredExit.limitPrice).toBe(0.01);
+    expect(flooredExit.limitPrice).toBe(0.05);
     expect(flooredExit.size).toBe(12.123456789);
   });
 });

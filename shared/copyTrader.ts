@@ -65,7 +65,9 @@ export function summarizeLiveWallet(
   now: number,
   config: CopyTraderConfig
 ): LiveWalletSignal | undefined {
-  const sorted = trades.filter((trade) => trade.conditionId === market.conditionId).sort((a, b) => a.timestamp - b.timestamp);
+  const sorted = trades
+    .filter((trade) => trade.conditionId === market.conditionId && sameWallet(trade.proxyWallet, wallet))
+    .sort((a, b) => a.timestamp - b.timestamp);
   if (sorted.length === 0) return undefined;
 
   const first = sorted[0];
@@ -148,10 +150,7 @@ export function buildEntryTicket(input: {
   now: number;
   config: CopyTraderConfig;
 }): PreparedTradeTicket {
-  const limitPrice = Math.min(
-    0.99,
-    roundToTick(input.observedPrice + input.config.maxSlippageCents / 100, input.market.minTickSize)
-  );
+  const limitPrice = entryLimitPrice(input.observedPrice, input.config.maxSlippageCents, input.market.minTickSize);
   const size = input.config.defaultEntrySpendUsdc / limitPrice;
 
   return ticket({
@@ -176,10 +175,7 @@ export function buildExitTicket(input: {
   now: number;
   config: CopyTraderConfig;
 }): PreparedTradeTicket {
-  const limitPrice = Math.max(
-    0.01,
-    roundToTick(input.observedPrice - input.config.maxSlippageCents / 100, input.market.minTickSize)
-  );
+  const limitPrice = exitLimitPrice(input.observedPrice, input.config.maxSlippageCents, input.market.minTickSize);
   const size = Math.min(input.requestedShares, input.availableShares);
 
   return ticket({
@@ -231,6 +227,10 @@ function cooldownKey(key: SignalCooldownKey): string {
   return `${key.kind}:${key.wallet}:${key.conditionId}`;
 }
 
+function sameWallet(left: string, right: string): boolean {
+  return left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
 function activityId(trade: ActivityTrade): string {
   return [
     trade.transactionHash,
@@ -242,8 +242,26 @@ function activityId(trade: ActivityTrade): string {
   ].join(":");
 }
 
+function entryLimitPrice(observedPrice: number, maxSlippageCents: number, tick: number): number {
+  const rounded = roundToTick(observedPrice + maxSlippageCents / 100, tick);
+  return rounded > 0.99 ? floorToTick(0.99, tick) : rounded;
+}
+
+function exitLimitPrice(observedPrice: number, maxSlippageCents: number, tick: number): number {
+  const rounded = roundToTick(observedPrice - maxSlippageCents / 100, tick);
+  return rounded < 0.01 ? ceilToTick(0.01, tick) : rounded;
+}
+
 function roundToTick(value: number, tick: number): number {
   return round(Math.round(value / tick) * tick);
+}
+
+function floorToTick(value: number, tick: number): number {
+  return round(Math.floor(value / tick) * tick);
+}
+
+function ceilToTick(value: number, tick: number): number {
+  return round(Math.ceil(value / tick) * tick);
 }
 
 function round(value: number): number {
