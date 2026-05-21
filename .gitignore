@@ -3,5 +3,6 @@ dist/
 .vite/
 coverage/
 reports/
+.superpowers/
 npm-debug.log*
 dev-server.*.log
