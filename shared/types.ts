@@ -71,6 +71,13 @@ export type GammaMarket = {
   outcomes: string;
   outcomePrices: string;
   closed: boolean;
+  clobTokenIds?: string;
+  orderPriceMinTickSize?: number | string;
+  negRisk?: boolean;
+  active?: boolean;
+  acceptingOrders?: boolean;
+  startDate?: string;
+  eventStartTime?: string;
   umaResolutionStatus?: string;
 };
 

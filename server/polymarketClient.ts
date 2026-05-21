@@ -1,5 +1,5 @@
 import { getActivityId } from "../shared/polymarket";
-import type { ActivityTrade, GammaEvent, GammaMarket, LeaderboardTrader, PositionLeg } from "../shared/types";
+import type { ActivityTrade, GammaEvent, GammaMarket, LeaderboardTrader, MarketMetadata, MarketType, PositionLeg } from "../shared/types";
 
 const DATA_API = "https://data-api.polymarket.com";
 const GAMMA_API = "https://gamma-api.polymarket.com";
@@ -74,6 +74,38 @@ export class PolymarketClient {
     return event?.markets?.find((market) => market.slug === slug);
   }
 
+  async getGammaEventBySlug(slug: string): Promise<GammaEvent | undefined> {
+    const url = new URL("/events", GAMMA_API);
+    url.searchParams.set("slug", slug);
+    const [event] = readList<GammaEvent>(await fetchJson(url));
+    return event;
+  }
+
+  async getShortTermBtcMarkets(options: { marketType: MarketType; now?: number; lookbackMarkets?: number }): Promise<MarketMetadata[]> {
+    const marketSeconds = options.marketType === "5m" ? 5 * 60 : 15 * 60;
+    const now = options.now ?? Math.floor(Date.now() / 1000);
+    const currentStart = Math.floor(now / marketSeconds) * marketSeconds;
+    const count = options.lookbackMarkets ?? 6;
+    const slugs = Array.from({ length: count }, (_, index) => `btc-updown-${options.marketType}-${currentStart - index * marketSeconds}`);
+    const markets = await Promise.all(slugs.map((slug) => this.getShortTermBtcMarketBySlug(slug, options.marketType)));
+    return markets.filter((market): market is MarketMetadata => Boolean(market));
+  }
+
+  async getShortTermBtcMarketBySlug(slug: string, marketType: MarketType): Promise<MarketMetadata | undefined> {
+    const event = await this.getGammaEventBySlug(slug);
+    const market = event?.markets?.find((candidate) => candidate.slug === slug);
+    return market ? marketMetadataFromGammaMarket(market, marketType) : undefined;
+  }
+
+  async getTradesByMarkets(conditionIds: string[]): Promise<ActivityTrade[]> {
+    if (conditionIds.length === 0) return [];
+    const url = new URL("/trades", DATA_API);
+    url.searchParams.set("market", conditionIds.join(","));
+    url.searchParams.set("limit", "10000");
+    url.searchParams.set("takerOnly", "false");
+    return readList<ActivityTrade>(await fetchJson(url));
+  }
+
   private async getActivityRangePageable(wallet: string, start: number, end: number): Promise<ActivityTrade[]> {
     const rows: ActivityTrade[] = [];
 
@@ -130,4 +162,42 @@ function readList<T>(body: unknown): T[] {
     if (Array.isArray(maybeList.data)) return maybeList.data as T[];
   }
   return [];
+}
+
+export function marketMetadataFromGammaMarket(market: GammaMarket, marketType: MarketType): MarketMetadata | undefined {
+  if (!market.conditionId || market.closed || market.active === false || market.acceptingOrders === false) return undefined;
+
+  const outcomes = readJsonArray(market.outcomes).map(String);
+  const tokenIds = readJsonArray(market.clobTokenIds ?? "[]").map(String);
+  const prices = readJsonArray(market.outcomePrices).map((price) => Number(price));
+  if (outcomes.length === 0 || outcomes.length !== tokenIds.length) return undefined;
+
+  const startValue = market.startDate ?? market.eventStartTime ?? getStartIsoFromSlug(market.slug);
+  if (!startValue || !market.endDate) return undefined;
+
+  return {
+    conditionId: market.conditionId,
+    slug: market.slug,
+    title: market.question,
+    marketType,
+    startTimestamp: Math.floor(Date.parse(startValue) / 1000),
+    endTimestamp: Math.floor(Date.parse(market.endDate) / 1000),
+    outcomes: outcomes.map((name, index) => ({ name, tokenId: tokenIds[index], price: prices[index] })),
+    minTickSize: Number(market.orderPriceMinTickSize ?? 0.01),
+    negRisk: Boolean(market.negRisk)
+  };
+}
+
+function readJsonArray(value: string): unknown[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function getStartIsoFromSlug(slug: string): string | undefined {
+  const match = slug.match(/-(\d+)$/);
+  return match ? new Date(Number(match[1]) * 1000).toISOString() : undefined;
 }

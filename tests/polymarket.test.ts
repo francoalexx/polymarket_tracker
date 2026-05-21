@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { marketMetadataFromGammaMarket } from "../server/polymarketClient";
 import { analyzeCandidate, isBtcFiveMinuteTrade } from "../shared/candidateScanner";
 import {
   buildEntryTicket,
@@ -161,6 +162,44 @@ describe("candidate scanner", () => {
     expect(summary.holdThroughRate).toBe(1);
     expect(summary.copyabilityScore).toBeGreaterThan(60);
     expect(summary.copyabilityScore).toBeLessThan(80);
+  });
+});
+
+describe("Polymarket live market metadata", () => {
+  it("converts Gamma market fields into scanner market metadata", () => {
+    const market = marketMetadataFromGammaMarket(
+      {
+        question: "Bitcoin Up or Down",
+        conditionId: "0xcondition",
+        slug: "btc-updown-5m-1778315400",
+        endDate: "2026-05-21T12:05:00Z",
+        outcomes: "[\"Up\",\"Down\"]",
+        outcomePrices: "[\"0.54\",\"0.46\"]",
+        closed: false,
+        clobTokenIds: "[\"up-token\",\"down-token\"]",
+        orderPriceMinTickSize: 0.01,
+        negRisk: false,
+        active: true,
+        acceptingOrders: true,
+        startDate: "2026-05-21T12:00:00Z"
+      },
+      "5m"
+    );
+
+    expect(market).toEqual({
+      conditionId: "0xcondition",
+      slug: "btc-updown-5m-1778315400",
+      title: "Bitcoin Up or Down",
+      marketType: "5m",
+      startTimestamp: 1779364800,
+      endTimestamp: 1779365100,
+      outcomes: [
+        { name: "Up", tokenId: "up-token", price: 0.54 },
+        { name: "Down", tokenId: "down-token", price: 0.46 }
+      ],
+      minTickSize: 0.01,
+      negRisk: false
+    });
   });
 });
 
