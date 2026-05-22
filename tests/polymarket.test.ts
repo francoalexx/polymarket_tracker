@@ -1,7 +1,17 @@
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { marketMetadataFromGammaMarket } from "../server/polymarketClient";
 import { ScannerService } from "../server/scannerService";
-import { buildTradingProviderCommand, parseTradingProviderResponse } from "../server/tradingProvider";
+import {
+  PythonTradingProvider,
+  buildTradingProviderCommand,
+  executionFromProviderResponse,
+  parseTradingProviderResponse,
+  sanitizeTradingProviderText
+} from "../server/tradingProvider";
 import { analyzeCandidate, isBtcFiveMinuteTrade } from "../shared/candidateScanner";
 import {
   buildEntryTicket,
@@ -15,7 +25,7 @@ import {
 import { getActivityId, groupPositions, isShortTermCryptoMarket, isValidWallet, normalizeWallet } from "../shared/polymarket";
 import type { CandidateSummary } from "../shared/candidateScanner";
 import type { ActivityTrade, GammaMarket, PositionLeg } from "../shared/types";
-import type { CopyTraderConfig, MarketMetadata, SignalCooldownKey } from "../shared/types";
+import type { CopyTraderConfig, MarketMetadata, PreparedTradeTicket, SignalCooldownKey } from "../shared/types";
 
 describe("wallet helpers", () => {
   it("validates and normalizes wallet addresses", () => {
@@ -938,6 +948,106 @@ describe("trading provider bridge", () => {
     });
     expect(() => parseTradingProviderResponse("not json")).toThrow(/Invalid trading bridge response/);
   });
+
+  it("redacts secrets from parsed provider responses and execution messages", () => {
+    const previousSecret = process.env.POLYMARKET_API_SECRET;
+    process.env.POLYMARKET_API_SECRET = "super-secret-value";
+    try {
+      const result = parseTradingProviderResponse(
+        '{"status":"error","message":"POLYMARKET_API_SECRET super-secret-value","response":{"detail":"super-secret-value"}}'
+      );
+      const entry = executionFromProviderResponse(tradeTicket(), result);
+
+      expect(JSON.stringify(result)).not.toContain("super-secret-value");
+      expect(JSON.stringify(result)).not.toContain("POLYMARKET_API_SECRET");
+      expect(entry.message).not.toContain("super-secret-value");
+      expect(entry.message).not.toContain("POLYMARKET_API_SECRET");
+    } finally {
+      restoreEnv("POLYMARKET_API_SECRET", previousSecret);
+    }
+  });
+
+  it("sanitizes sensitive key names in bridge text", () => {
+    expect(sanitizeTradingProviderText("POLYMARKET_PRIVATE_KEY and POLYMARKET_API_PASSPHRASE failed")).toBe(
+      "[REDACTED_KEY] and [REDACTED_KEY] failed"
+    );
+  });
+
+  it("maps provider responses into execution logs", () => {
+    const ticket = tradeTicket();
+    const entry = executionFromProviderResponse(ticket, { status: "submitted", message: "ok", response: { id: "abc" } });
+
+    expect(entry.ticketId).toBe(ticket.id);
+    expect(entry.status).toBe("submitted");
+    expect(entry.message).toBe("ok");
+    expect(entry.response).toEqual({ id: "abc" });
+  });
+
+  it("returns sanitized error JSON for invalid Python bridge input", () => {
+    const bridge = spawnSync(
+      "python3",
+      ["trading/bridge/execute_ticket.py"],
+      {
+        cwd: process.cwd(),
+        input: JSON.stringify({
+          id: "bad",
+          token_id: "token",
+          side: "BUY",
+          price: 0.5,
+          size: 5,
+          tick_size: 0.01,
+          neg_risk: "false",
+          expires_at: 1779365100
+        }),
+        encoding: "utf8"
+      }
+    );
+    const result = JSON.parse(bridge.stdout);
+
+    expect(bridge.status).toBe(1);
+    expect(result.status).toBe("error");
+    expect(result.message).toMatch(/neg_risk/);
+    expect(result.message).not.toMatch(/POLYMARKET_PRIVATE_KEY|POLYMARKET_API_SECRET|POLYMARKET_API_PASSPHRASE/);
+  });
+
+  it("turns nonzero successful-looking bridge output into an error response", async () => {
+    const previousPython = process.env.PYTHON_BIN;
+    const fake = fakePython(
+      'process.stdout.write(JSON.stringify({ status: "submitted", message: "ok", response: { id: "abc" } })); process.exit(7);'
+    );
+    process.env.PYTHON_BIN = fake;
+    try {
+      const result = await new PythonTradingProvider().submit(tradeTicket());
+      expect(result.status).toBe("error");
+      expect(result.message).toMatch(/exited with code 7/);
+      expect(result.response).toEqual({ id: "abc" });
+    } finally {
+      restoreEnv("PYTHON_BIN", previousPython);
+    }
+  });
+
+  it("redacts and truncates stderr when bridge output is invalid", async () => {
+    const previousPython = process.env.PYTHON_BIN;
+    const previousSecret = process.env.POLYMARKET_PRIVATE_KEY;
+    process.env.POLYMARKET_PRIVATE_KEY = "secret-private-key";
+    const fake = fakePython(
+      'process.stdout.write("not json"); process.stderr.write("POLYMARKET_PRIVATE_KEY secret-private-key " + "x".repeat(5000));'
+    );
+    process.env.PYTHON_BIN = fake;
+    try {
+      let message = "";
+      try {
+        await new PythonTradingProvider().submit(tradeTicket());
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toMatch(/\[stderr truncated\]/);
+      expect(message).not.toMatch(/secret-private-key|POLYMARKET_PRIVATE_KEY/);
+    } finally {
+      restoreEnv("PYTHON_BIN", previousPython);
+      restoreEnv("POLYMARKET_PRIVATE_KEY", previousSecret);
+    }
+  });
 });
 
 function scannerClient(markets: MarketMetadata[], trades: ActivityTrade[]) {
@@ -976,6 +1086,52 @@ function candidateSummary(overrides: Partial<CandidateSummary> = {}): CandidateS
     markets: [],
     ...overrides
   };
+}
+
+function tradeTicket(overrides: Partial<PreparedTradeTicket> = {}): PreparedTradeTicket {
+  return {
+    id: "ticket-1",
+    kind: "entry",
+    status: "pending",
+    wallet: "0xcandidate",
+    market: {
+      conditionId: "0xmarket",
+      slug: "btc-updown-5m-2000",
+      title: "Bitcoin Up or Down",
+      marketType: "5m",
+      startTimestamp: 2000,
+      endTimestamp: 2300,
+      outcomes: [{ name: "Up", tokenId: "up-token", price: 0.54 }],
+      minTickSize: 0.01,
+      negRisk: false
+    },
+    outcome: "Up",
+    asset: "up-token",
+    observedPrice: 0.54,
+    limitPrice: 0.59,
+    size: 10,
+    candidateTradeId: "trade-1",
+    reason: "test ticket",
+    createdAt: 2010,
+    expiresAt: 2300,
+    ...overrides
+  };
+}
+
+function fakePython(source: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "trading-provider-"));
+  const script = join(dir, "fake-python.js");
+  writeFileSync(script, `#!/usr/bin/env node\n${source}\n`, "utf8");
+  chmodSync(script, 0o755);
+  return script;
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
 }
 
 function gammaMarket(overrides: Partial<GammaMarket> = {}): GammaMarket {

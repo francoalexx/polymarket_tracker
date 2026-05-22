@@ -1,6 +1,16 @@
 import { spawn } from "node:child_process";
 import type { ExecutionLogEntry, PreparedTradeTicket } from "../shared/types";
 
+const SENSITIVE_ENV_NAMES = [
+  "POLYMARKET_PRIVATE_KEY",
+  "POLYMARKET_API_KEY",
+  "POLYMARKET_API_SECRET",
+  "POLYMARKET_API_PASSPHRASE"
+];
+const BRIDGE_TIMEOUT_MS = 10_000;
+const MAX_OUTPUT_BYTES = 256 * 1024;
+const STDERR_MESSAGE_LIMIT = 2_000;
+
 export type TradingProviderResponse = {
   status: string;
   message: string;
@@ -32,10 +42,22 @@ export function parseTradingProviderResponse(raw: string): TradingProviderRespon
     if (!isRecord(parsed) || typeof parsed.status !== "string" || typeof parsed.message !== "string") {
       throw new Error("Missing status or message");
     }
-    return parsed as TradingProviderResponse;
+    return sanitizeTradingProviderValue(parsed) as TradingProviderResponse;
   } catch (error) {
-    throw new Error(`Invalid trading bridge response: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Invalid trading bridge response: ${sanitizeTradingProviderText(error instanceof Error ? error.message : String(error))}`);
   }
+}
+
+export function sanitizeTradingProviderText(text: string): string {
+  let sanitized = text;
+  for (const name of SENSITIVE_ENV_NAMES) {
+    const value = process.env[name];
+    if (value) {
+      sanitized = sanitized.split(value).join("[REDACTED_SECRET]");
+    }
+    sanitized = sanitized.replace(new RegExp(`\\b${escapeRegExp(name)}\\b`, "g"), "[REDACTED_KEY]");
+  }
+  return sanitized;
 }
 
 export class PythonTradingProvider implements TradingProvider {
@@ -48,7 +70,7 @@ export class PythonTradingProvider implements TradingProvider {
       return {
         mode: "live",
         ready: false,
-        message: "POLYMARKET_PRIVATE_KEY is required for live trading."
+        message: "Private key is required for live trading."
       };
     }
 
@@ -72,27 +94,72 @@ export class PythonTradingProvider implements TradingProvider {
       const child = spawn(command.command, command.args, { cwd: process.cwd(), stdio: ["pipe", "pipe", "pipe"] });
       let stdout = "";
       let stderr = "";
+      let settled = false;
+      let guardMessage: string | undefined;
+      const timeout = setTimeout(() => {
+        guardMessage = "Trading bridge timed out.";
+        child.kill("SIGTERM");
+      }, BRIDGE_TIMEOUT_MS);
+
+      const settle = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        callback();
+      };
 
       child.stdout.setEncoding("utf8");
       child.stderr.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
         stdout += chunk;
+        if (Buffer.byteLength(stdout, "utf8") > MAX_OUTPUT_BYTES) {
+          guardMessage = "Trading bridge stdout exceeded output limit.";
+          child.kill("SIGTERM");
+        }
       });
       child.stderr.on("data", (chunk: string) => {
         stderr += chunk;
-      });
-      child.on("error", reject);
-      child.on("close", () => {
-        try {
-          resolve(parseTradingProviderResponse(stdout.trim()));
-        } catch (error) {
-          const stderrSuffix = stderr.trim() ? ` ${stderr.trim()}` : "";
-          reject(
-            new Error(
-              `${error instanceof Error ? error.message : String(error)}${stderrSuffix}`
-            )
-          );
+        if (Buffer.byteLength(stderr, "utf8") > MAX_OUTPUT_BYTES) {
+          guardMessage = "Trading bridge stderr exceeded output limit.";
+          child.kill("SIGTERM");
         }
+      });
+      child.on("error", (error) => {
+        settle(() => reject(new Error(sanitizeTradingProviderText(error.message))));
+      });
+      child.on("close", (code) => {
+        settle(() => {
+          if (guardMessage) {
+            resolve({ status: "error", message: guardMessage });
+            return;
+          }
+
+          const raw = stdout.trim();
+          const stderrMessage = stderr.trim() ? ` ${truncateStderr(stderr)}` : "";
+          let parsed: TradingProviderResponse;
+
+          try {
+            parsed = parseTradingProviderResponse(raw);
+          } catch (error) {
+            reject(
+              new Error(
+                `${error instanceof Error ? error.message : String(error)}${stderrMessage}`
+              )
+            );
+            return;
+          }
+
+          if (code && code !== 0 && parsed.status !== "error") {
+            resolve({
+              ...parsed,
+              status: "error",
+              message: sanitizeTradingProviderText(`Trading bridge exited with code ${code}: ${parsed.message}`)
+            });
+            return;
+          }
+
+          resolve(parsed);
+        });
       });
 
       child.stdin.end(payload);
@@ -108,16 +175,37 @@ export function executionFromProviderResponse(
     id: `execution:${ticket.id}:${Date.now()}`,
     ticketId: ticket.id,
     status: executionStatus(result.status),
-    message: result.message,
-    response: result.response,
+    message: sanitizeTradingProviderText(result.message),
+    response: sanitizeTradingProviderValue(result.response),
     createdAt: Date.now()
   };
+}
+
+function sanitizeTradingProviderValue(value: unknown): unknown {
+  if (typeof value === "string") return sanitizeTradingProviderText(value);
+  if (Array.isArray(value)) return value.map((item) => sanitizeTradingProviderValue(item));
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [sanitizeTradingProviderText(key), sanitizeTradingProviderValue(entry)])
+    );
+  }
+  return value;
+}
+
+function truncateStderr(stderr: string): string {
+  const sanitized = sanitizeTradingProviderText(stderr.trim());
+  if (sanitized.length <= STDERR_MESSAGE_LIMIT) return sanitized;
+  return `${sanitized.slice(0, STDERR_MESSAGE_LIMIT)} [stderr truncated]`;
 }
 
 function executionStatus(status: string): ExecutionLogEntry["status"] {
   if (status === "dry_run" || status === "submitted") return status;
   if (status === "rejected") return "rejected";
   return "error";
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
