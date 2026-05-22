@@ -1,4 +1,4 @@
-import { analyzeCandidate } from "../shared/candidateScanner";
+import { analyzeCandidate, isBtcShortTermHistoryTrade } from "../shared/candidateScanner";
 import {
   DEFAULT_COPY_TRADER_CONFIG,
   buildEntryTicket,
@@ -53,7 +53,8 @@ export class ScannerService {
   private readonly latencySamples: LatencySample[] = [];
   private readonly cooldowns = new Map<string, number>();
   private readonly historySummaryCache = new Map<string, { expiresAt: number; summary: Promise<CandidateSummary> }>();
-  private readonly winnerCache = new Map<string, Promise<string | undefined>>();
+  private readonly winnerCache = new Map<string, string>();
+  private readonly pendingWinnerLookups = new Map<string, Promise<string | undefined>>();
   private snapshot: ScannerSnapshot;
   private timer?: NodeJS.Timeout;
   private inFlightScan?: Promise<void>;
@@ -259,9 +260,10 @@ export class ScannerService {
   private async buildHistorySummary(wallet: string, end: number): Promise<CandidateSummary> {
     const start = end - 7 * 24 * 60 * 60;
     const activity = await this.client.getActivityRange(wallet, start, end);
-    const winnerByCondition = await this.loadWinners(activity);
+    const relevantActivity = activity.filter(isBtcShortTermHistoryTrade);
+    const winnerByCondition = await this.loadWinners(relevantActivity);
 
-    return analyzeCandidate({ proxyWallet: wallet, rank: "", pnl: 0, vol: 0 }, activity, winnerByCondition, {
+    return analyzeCandidate({ proxyWallet: wallet, rank: "", pnl: 0, vol: 0 }, relevantActivity, winnerByCondition, {
       marketTypes: ["5m", "15m"],
       earlyEntrySeconds: this.config.earlyEntrySeconds
     });
@@ -284,16 +286,25 @@ export class ScannerService {
 
   private getCachedWinner(trade: ActivityTrade): Promise<string | undefined> {
     const cached = this.winnerCache.get(trade.conditionId);
-    if (cached) return cached;
+    if (cached) return Promise.resolve(cached);
+
+    const pending = this.pendingWinnerLookups.get(trade.conditionId);
+    if (pending) return pending;
 
     const winner = this.client
       .getGammaMarketBySlug(trade.slug)
-      .then((gammaMarket) => (gammaMarket ? getWinningOutcome(gammaMarket) : undefined))
+      .then((gammaMarket) => {
+        const resolvedWinner = gammaMarket ? getWinningOutcome(gammaMarket) : undefined;
+        if (resolvedWinner) this.winnerCache.set(trade.conditionId, resolvedWinner);
+        return resolvedWinner;
+      })
       .catch((error) => {
-        this.winnerCache.delete(trade.conditionId);
         throw error;
+      })
+      .finally(() => {
+        this.pendingWinnerLookups.delete(trade.conditionId);
       });
-    this.winnerCache.set(trade.conditionId, winner);
+    this.pendingWinnerLookups.set(trade.conditionId, winner);
     return winner;
   }
 

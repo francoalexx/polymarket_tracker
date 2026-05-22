@@ -745,6 +745,137 @@ describe("scanner service", () => {
     expect(gammaCalls).toHaveLength(20);
   });
 
+  it("retries unresolved winner lookups after the wallet summary cache expires", async () => {
+    const wallet = "0x1111111111111111111111111111111111111111";
+    let now = 3020;
+    let liveMarket = scanMarket;
+    const history = Array.from({ length: 20 }, (_, index) =>
+      trade({
+        proxyWallet: wallet,
+        conditionId: `0xretry${index}`,
+        slug: `btc-updown-5m-${1000 + index * 300}`,
+        title: "Bitcoin Up or Down",
+        timestamp: 1010 + index * 300,
+        outcome: "Up",
+        asset: "up-token",
+        size: 10,
+        usdcSize: 4,
+        price: 0.4
+      })
+    );
+    const gammaCalls: string[] = [];
+    const service = new ScannerService({
+      now: () => now,
+      client: {
+        getShortTermBtcMarkets: async () => [liveMarket],
+        getTradesByMarkets: async () => [
+          trade({
+            proxyWallet: wallet,
+            conditionId: liveMarket.conditionId,
+            slug: liveMarket.slug,
+            title: liveMarket.title,
+            timestamp: liveMarket.startTimestamp + 10,
+            outcome: "Up",
+            asset: "up-token",
+            size: 30,
+            usdcSize: 16.2,
+            price: 0.54
+          })
+        ],
+        getLeaderboardTraders: async () => [],
+        getActivityRange: async () => history,
+        getGammaMarketBySlug: async (slug) => {
+          gammaCalls.push(slug);
+          return gammaMarket({
+            conditionId: history.find((item) => item.slug === slug)?.conditionId,
+            slug,
+            closed: gammaCalls.length > 20,
+            outcomePrices: gammaCalls.length > 20 ? "[\"1\",\"0\"]" : "[\"0.5\",\"0.5\"]"
+          });
+        }
+      }
+    });
+
+    await service.scanOnce();
+    expect(service.getSnapshot().candidates).toHaveLength(0);
+    expect(gammaCalls).toHaveLength(20);
+
+    now += 301;
+    liveMarket = { ...scanMarket, conditionId: "0xretry-live", slug: "btc-updown-5m-3600", startTimestamp: 3600, endTimestamp: 3900 };
+    await service.scanOnce();
+
+    expect(service.getSnapshot().candidates).toHaveLength(1);
+    expect(gammaCalls).toHaveLength(40);
+  });
+
+  it("does not load Gamma winners for unrelated non-BTC history", async () => {
+    const wallet = "0x1111111111111111111111111111111111111111";
+    const btcHistory = Array.from({ length: 20 }, (_, index) =>
+      trade({
+        proxyWallet: wallet,
+        conditionId: `0xbtc${index}`,
+        slug: `btc-updown-5m-${1000 + index * 300}`,
+        title: "Bitcoin Up or Down",
+        timestamp: 1010 + index * 300,
+        outcome: "Up",
+        asset: "up-token",
+        size: 10,
+        usdcSize: 4,
+        price: 0.4
+      })
+    );
+    const unrelated = trade({
+      proxyWallet: wallet,
+      conditionId: "0xelection",
+      slug: "election-winner-2028",
+      title: "Election winner",
+      timestamp: 2500,
+      outcome: "Yes",
+      asset: "yes-token",
+      size: 10,
+      usdcSize: 5,
+      price: 0.5
+    });
+    const gammaCalls: string[] = [];
+    const service = new ScannerService({
+      now: () => 3020,
+      client: {
+        getShortTermBtcMarkets: async () => [scanMarket],
+        getTradesByMarkets: async () => [
+          trade({
+            proxyWallet: wallet,
+            conditionId: scanMarket.conditionId,
+            slug: scanMarket.slug,
+            title: scanMarket.title,
+            timestamp: scanMarket.startTimestamp + 10,
+            outcome: "Up",
+            asset: "up-token",
+            size: 30,
+            usdcSize: 16.2,
+            price: 0.54
+          })
+        ],
+        getLeaderboardTraders: async () => [],
+        getActivityRange: async () => [...btcHistory, unrelated],
+        getGammaMarketBySlug: async (slug) => {
+          gammaCalls.push(slug);
+          return gammaMarket({
+            conditionId: btcHistory.find((item) => item.slug === slug)?.conditionId,
+            slug,
+            closed: true,
+            outcomePrices: "[\"1\",\"0\"]"
+          });
+        }
+      }
+    });
+
+    await service.scanOnce();
+
+    expect(service.getSnapshot().candidates).toHaveLength(1);
+    expect(gammaCalls).toHaveLength(20);
+    expect(gammaCalls).not.toContain(unrelated.slug);
+  });
+
   it("preserves tickets and executions across later empty scans", async () => {
     let trades = [
       trade({
