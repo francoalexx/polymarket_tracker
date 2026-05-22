@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { marketMetadataFromGammaMarket } from "../server/polymarketClient";
 import { ScannerService } from "../server/scannerService";
+import { buildTradingProviderCommand, parseTradingProviderResponse } from "../server/tradingProvider";
 import { analyzeCandidate, isBtcFiveMinuteTrade } from "../shared/candidateScanner";
 import {
   buildEntryTicket,
@@ -918,6 +919,24 @@ describe("scanner service", () => {
 
     expect(service.getSnapshot().tickets).toContainEqual(ticket);
     expect(service.getSnapshot().executions).toHaveLength(1);
+  });
+});
+
+describe("trading provider bridge", () => {
+  it("builds a local Python bridge command without leaking secrets", () => {
+    const command = buildTradingProviderCommand();
+    expect(command.command).toMatch(/python/);
+    expect(command.args).toContain("trading/bridge/execute_ticket.py");
+    expect(JSON.stringify(command)).not.toMatch(/POLYMARKET_PRIVATE_KEY|POLYMARKET_API_SECRET/);
+  });
+
+  it("parses bridge JSON responses", () => {
+    expect(parseTradingProviderResponse('{"status":"dry_run","message":"ok","response":{"id":"abc"}}')).toEqual({
+      status: "dry_run",
+      message: "ok",
+      response: { id: "abc" }
+    });
+    expect(() => parseTradingProviderResponse("not json")).toThrow(/Invalid trading bridge response/);
   });
 });
 

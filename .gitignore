@@ -6,3 +6,7 @@ reports/
 .superpowers/
 npm-debug.log*
 dev-server.*.log
+.env
+.venv/
+trading/.venv/
+__pycache__/
