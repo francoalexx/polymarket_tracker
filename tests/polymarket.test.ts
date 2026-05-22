@@ -1048,6 +1048,26 @@ describe("trading provider bridge", () => {
       restoreEnv("POLYMARKET_PRIVATE_KEY", previousSecret);
     }
   });
+
+  it("returns promptly when the bridge ignores SIGTERM after timeout", async () => {
+    const previousPython = process.env.PYTHON_BIN;
+    const fake = fakePython(
+      'process.on("SIGTERM", () => {}); setInterval(() => process.stdout.write("still running\\n"), 20);'
+    );
+    process.env.PYTHON_BIN = fake;
+    try {
+      const startedAt = Date.now();
+      const result = await new PythonTradingProvider({ timeoutMs: 50, killGraceMs: 30, maxOutputBytes: 1024 }).submit(
+        tradeTicket()
+      );
+
+      expect(result.status).toBe("error");
+      expect(result.message).toMatch(/timed out/);
+      expect(Date.now() - startedAt).toBeLessThan(500);
+    } finally {
+      restoreEnv("PYTHON_BIN", previousPython);
+    }
+  });
 });
 
 function scannerClient(markets: MarketMetadata[], trades: ActivityTrade[]) {

@@ -8,6 +8,7 @@ const SENSITIVE_ENV_NAMES = [
   "POLYMARKET_API_PASSPHRASE"
 ];
 const BRIDGE_TIMEOUT_MS = 10_000;
+const BRIDGE_KILL_GRACE_MS = 500;
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const STDERR_MESSAGE_LIMIT = 2_000;
 
@@ -27,6 +28,12 @@ export type TradingProviderStatus = {
 export type TradingProvider = {
   status(): TradingProviderStatus;
   submit(ticket: PreparedTradeTicket): Promise<TradingProviderResponse>;
+};
+
+export type PythonTradingProviderOptions = {
+  timeoutMs?: number;
+  killGraceMs?: number;
+  maxOutputBytes?: number;
 };
 
 export function buildTradingProviderCommand(): { command: string; args: string[] } {
@@ -61,6 +68,16 @@ export function sanitizeTradingProviderText(text: string): string {
 }
 
 export class PythonTradingProvider implements TradingProvider {
+  private readonly timeoutMs: number;
+  private readonly killGraceMs: number;
+  private readonly maxOutputBytes: number;
+
+  constructor(options: PythonTradingProviderOptions = {}) {
+    this.timeoutMs = options.timeoutMs ?? BRIDGE_TIMEOUT_MS;
+    this.killGraceMs = options.killGraceMs ?? BRIDGE_KILL_GRACE_MS;
+    this.maxOutputBytes = options.maxOutputBytes ?? MAX_OUTPUT_BYTES;
+  }
+
   status(): TradingProviderStatus {
     if (process.env.COPY_TRADER_DRY_RUN !== "false") {
       return { mode: "dry_run", ready: true, message: "Trading bridge is in dry-run mode." };
@@ -95,33 +112,49 @@ export class PythonTradingProvider implements TradingProvider {
       let stdout = "";
       let stderr = "";
       let settled = false;
-      let guardMessage: string | undefined;
+      let killGrace: ReturnType<typeof setTimeout> | undefined;
       const timeout = setTimeout(() => {
-        guardMessage = "Trading bridge timed out.";
-        child.kill("SIGTERM");
-      }, BRIDGE_TIMEOUT_MS);
+        resolveGuard("Trading bridge timed out.");
+      }, this.timeoutMs);
 
       const settle = (callback: () => void) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        if (killGrace) clearTimeout(killGrace);
         callback();
+      };
+
+      const cleanupChild = () => {
+        if (child.killed || child.exitCode !== null || child.signalCode !== null) return;
+        child.kill("SIGTERM");
+        killGrace = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) {
+            child.kill("SIGKILL");
+          }
+        }, this.killGraceMs);
+        killGrace.unref?.();
+      };
+
+      const resolveGuard = (message: string) => {
+        settle(() => {
+          cleanupChild();
+          resolve({ status: "error", message });
+        });
       };
 
       child.stdout.setEncoding("utf8");
       child.stderr.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
         stdout += chunk;
-        if (Buffer.byteLength(stdout, "utf8") > MAX_OUTPUT_BYTES) {
-          guardMessage = "Trading bridge stdout exceeded output limit.";
-          child.kill("SIGTERM");
+        if (Buffer.byteLength(stdout, "utf8") > this.maxOutputBytes) {
+          resolveGuard("Trading bridge stdout exceeded output limit.");
         }
       });
       child.stderr.on("data", (chunk: string) => {
         stderr += chunk;
-        if (Buffer.byteLength(stderr, "utf8") > MAX_OUTPUT_BYTES) {
-          guardMessage = "Trading bridge stderr exceeded output limit.";
-          child.kill("SIGTERM");
+        if (Buffer.byteLength(stderr, "utf8") > this.maxOutputBytes) {
+          resolveGuard("Trading bridge stderr exceeded output limit.");
         }
       });
       child.on("error", (error) => {
@@ -129,11 +162,6 @@ export class PythonTradingProvider implements TradingProvider {
       });
       child.on("close", (code) => {
         settle(() => {
-          if (guardMessage) {
-            resolve({ status: "error", message: guardMessage });
-            return;
-          }
-
           const raw = stdout.trim();
           const stderrMessage = stderr.trim() ? ` ${truncateStderr(stderr)}` : "";
           let parsed: TradingProviderResponse;
