@@ -4,7 +4,6 @@ import {
   buildEntryTicket,
   getLatencyMode,
   passesStrictHistory,
-  shouldSuppressRepeatSignal,
   summarizeLiveWallet
 } from "../shared/copyTrader";
 import type { CandidateSummary } from "../shared/candidateScanner";
@@ -17,6 +16,7 @@ import type {
   LatencySample,
   MarketMetadata,
   PreparedTradeTicket,
+  SignalCooldownKey,
   ScannerSnapshot
 } from "../shared/types";
 import { PolymarketClient } from "./polymarketClient";
@@ -40,6 +40,8 @@ const MAX_LATENCY_SAMPLES = 100;
 const MAX_CANDIDATES = 50;
 const MAX_TICKETS = 50;
 const MAX_EXECUTIONS = 100;
+const HISTORY_CACHE_SECONDS = 5 * 60;
+const WINNER_LOOKUP_CONCURRENCY = 4;
 
 export class ScannerService {
   private readonly client: ScannerClient;
@@ -50,8 +52,11 @@ export class ScannerService {
   private readonly subscribers = new Set<ScannerSubscriber>();
   private readonly latencySamples: LatencySample[] = [];
   private readonly cooldowns = new Map<string, number>();
+  private readonly historySummaryCache = new Map<string, { expiresAt: number; summary: Promise<CandidateSummary> }>();
+  private readonly winnerCache = new Map<string, Promise<string | undefined>>();
   private snapshot: ScannerSnapshot;
   private timer?: NodeJS.Timeout;
+  private inFlightScan?: Promise<void>;
 
   constructor(options: ScannerServiceOptions = {}) {
     this.client = options.client ?? new PolymarketClient();
@@ -119,6 +124,17 @@ export class ScannerService {
   }
 
   async scanOnce(): Promise<void> {
+    if (this.inFlightScan) return this.inFlightScan;
+
+    this.inFlightScan = this.runScanOnce();
+    try {
+      await this.inFlightScan;
+    } finally {
+      this.inFlightScan = undefined;
+    }
+  }
+
+  private async runScanOnce(): Promise<void> {
     try {
       const latency = getLatencyMode(this.latencySamples.slice(-20), this.config);
       const markets = await this.client.getShortTermBtcMarkets({
@@ -178,12 +194,18 @@ export class ScannerService {
         const signal = summarizeLiveWallet(wallet, walletTrades, market, now, this.config);
         if (!signal) continue;
 
+        const isActionable = signal.recommendation === "prepare_entry" || signal.recommendation === "prepare_exit";
         const kind = signal.recommendation === "prepare_exit" ? "exit" : "entry";
-        if (shouldSuppressRepeatSignal({ wallet, conditionId, kind }, this.cooldowns, now, this.config)) continue;
+        const cooldownKey: SignalCooldownKey = { wallet, conditionId, kind };
+        if (isActionable && this.isCoolingDown(cooldownKey, now)) continue;
 
         const history = await this.summarizeHistory(wallet, walletTrades);
         const strictPass = passesStrictHistory(history);
         if (!strictPass) continue;
+
+        if (isActionable) {
+          this.markCooldown(cooldownKey, now);
+        }
 
         candidates.push({
           wallet,
@@ -224,6 +246,17 @@ export class ScannerService {
     if (this.summarizeHistoryOverride) return this.summarizeHistoryOverride(wallet, signalTrades);
 
     const end = this.now();
+    const cacheKey = wallet.trim().toLowerCase();
+    const cached = this.historySummaryCache.get(cacheKey);
+    if (cached && cached.expiresAt > end) return cached.summary;
+
+    const summary = this.buildHistorySummary(wallet, end);
+    this.historySummaryCache.set(cacheKey, { expiresAt: end + HISTORY_CACHE_SECONDS, summary });
+    summary.catch(() => this.historySummaryCache.delete(cacheKey));
+    return summary;
+  }
+
+  private async buildHistorySummary(wallet: string, end: number): Promise<CandidateSummary> {
     const start = end - 7 * 24 * 60 * 60;
     const activity = await this.client.getActivityRange(wallet, start, end);
     const winnerByCondition = await this.loadWinners(activity);
@@ -241,15 +274,36 @@ export class ScannerService {
     }
 
     const winnerByCondition = new Map<string, string>();
-    await Promise.all(
-      Array.from(tradeByCondition.values()).map(async (trade) => {
-        const gammaMarket = await this.client.getGammaMarketBySlug(trade.slug);
-        const winner = gammaMarket ? getWinningOutcome(gammaMarket) : undefined;
-        if (winner) winnerByCondition.set(trade.conditionId, winner);
-      })
-    );
+    await mapWithConcurrency(Array.from(tradeByCondition.values()), WINNER_LOOKUP_CONCURRENCY, async (trade) => {
+      const winner = await this.getCachedWinner(trade);
+      if (winner) winnerByCondition.set(trade.conditionId, winner);
+    });
 
     return winnerByCondition;
+  }
+
+  private getCachedWinner(trade: ActivityTrade): Promise<string | undefined> {
+    const cached = this.winnerCache.get(trade.conditionId);
+    if (cached) return cached;
+
+    const winner = this.client
+      .getGammaMarketBySlug(trade.slug)
+      .then((gammaMarket) => (gammaMarket ? getWinningOutcome(gammaMarket) : undefined))
+      .catch((error) => {
+        this.winnerCache.delete(trade.conditionId);
+        throw error;
+      });
+    this.winnerCache.set(trade.conditionId, winner);
+    return winner;
+  }
+
+  private isCoolingDown(key: SignalCooldownKey, now: number): boolean {
+    const previous = this.cooldowns.get(cooldownKey(key));
+    return previous !== undefined && now - previous < this.config.repeatCooldownSeconds;
+  }
+
+  private markCooldown(key: SignalCooldownKey, now: number): void {
+    this.cooldowns.set(cooldownKey(key), now);
   }
 
   private addLatencySample(sample: LatencySample): void {
@@ -305,4 +359,23 @@ function readJsonArray(value: string): unknown[] {
   } catch {
     return [];
   }
+}
+
+function cooldownKey(key: SignalCooldownKey): string {
+  return `${key.kind}:${key.wallet}:${key.conditionId}`;
+}
+
+async function mapWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>): Promise<void> {
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const item = items[nextIndex];
+        nextIndex += 1;
+        await worker(item);
+      }
+    })
+  );
 }

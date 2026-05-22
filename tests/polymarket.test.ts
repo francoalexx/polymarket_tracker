@@ -560,30 +560,30 @@ describe("hybrid copy trader pure logic", () => {
 });
 
 describe("scanner service", () => {
-  it("promotes strict live candidates and creates entry tickets", async () => {
-    const market: MarketMetadata = {
-      conditionId: "0xscan",
-      slug: "btc-updown-5m-3000",
-      title: "Bitcoin Up or Down",
-      marketType: "5m",
-      startTimestamp: 3000,
-      endTimestamp: 3300,
-      outcomes: [{ name: "Up", tokenId: "up-token", price: 0.54 }],
-      minTickSize: 0.01,
-      negRisk: false
-    };
+  const scanMarket: MarketMetadata = {
+    conditionId: "0xscan",
+    slug: "btc-updown-5m-3000",
+    title: "Bitcoin Up or Down",
+    marketType: "5m",
+    startTimestamp: 3000,
+    endTimestamp: 3300,
+    outcomes: [{ name: "Up", tokenId: "up-token", price: 0.54 }],
+    minTickSize: 0.01,
+    negRisk: false
+  };
 
+  it("promotes strict live candidates and creates entry tickets", async () => {
     const service = new ScannerService({
       now: () => 3020,
       intervalMs: 60_000,
       client: {
-        getShortTermBtcMarkets: async () => [market],
+        getShortTermBtcMarkets: async () => [scanMarket],
         getTradesByMarkets: async () => [
           trade({
             proxyWallet: "0x1111111111111111111111111111111111111111",
             conditionId: "0xscan",
-            slug: market.slug,
-            title: market.title,
+            slug: scanMarket.slug,
+            title: scanMarket.title,
             timestamp: 3010,
             outcome: "Up",
             asset: "up-token",
@@ -607,7 +607,198 @@ describe("scanner service", () => {
     expect(snapshot.tickets).toHaveLength(1);
     expect(snapshot.tickets[0].limitPrice).toBe(0.59);
   });
+
+  it("reuses the in-flight scan for concurrent scanOnce calls", async () => {
+    let marketCalls = 0;
+    let resolveMarkets: ((markets: MarketMetadata[]) => void) | undefined;
+    const marketsReady = new Promise<MarketMetadata[]>((resolve) => {
+      resolveMarkets = resolve;
+    });
+    const service = new ScannerService({
+      now: () => 3020,
+      client: {
+        getShortTermBtcMarkets: async () => {
+          marketCalls += 1;
+          return marketsReady;
+        },
+        getTradesByMarkets: async () => [],
+        getLeaderboardTraders: async () => [],
+        getActivityRange: async () => [],
+        getGammaMarketBySlug: async () => undefined
+      },
+      summarizeHistory: async () => candidateSummary()
+    });
+
+    const first = service.scanOnce();
+    const second = service.scanOnce();
+
+    expect(marketCalls).toBe(1);
+    resolveMarkets?.([scanMarket]);
+    await Promise.all([first, second]);
+    expect(marketCalls).toBe(1);
+  });
+
+  it("does not burn cooldowns for strict-failing signals", async () => {
+    let historyCalls = 0;
+    const service = new ScannerService({
+      now: () => 3020,
+      client: scannerClient([scanMarket], [
+        trade({
+          proxyWallet: "0x1111111111111111111111111111111111111111",
+          conditionId: scanMarket.conditionId,
+          slug: scanMarket.slug,
+          title: scanMarket.title,
+          timestamp: 3010,
+          outcome: "Up",
+          asset: "up-token",
+          size: 30,
+          usdcSize: 16.2,
+          price: 0.54
+        })
+      ]),
+      summarizeHistory: async () => {
+        historyCalls += 1;
+        return candidateSummary(historyCalls === 1 ? { totalMarkets: 1 } : {});
+      }
+    });
+
+    await service.scanOnce();
+    expect(service.getSnapshot().candidates).toHaveLength(0);
+
+    await service.scanOnce();
+    expect(service.getSnapshot().candidates).toHaveLength(1);
+    expect(service.getSnapshot().tickets).toHaveLength(1);
+  });
+
+  it("loads closed Gamma winners for default history and caches wallet summaries", async () => {
+    const wallet = "0x1111111111111111111111111111111111111111";
+    const secondMarket: MarketMetadata = { ...scanMarket, conditionId: "0xscan2", slug: "btc-updown-5m-3300", startTimestamp: 3300, endTimestamp: 3600 };
+    let liveMarket = scanMarket;
+    let liveTrades = [
+      trade({
+        proxyWallet: wallet,
+        conditionId: liveMarket.conditionId,
+        slug: liveMarket.slug,
+        title: liveMarket.title,
+        timestamp: liveMarket.startTimestamp + 10,
+        outcome: "Up",
+        asset: "up-token",
+        size: 30,
+        usdcSize: 16.2,
+        price: 0.54
+      })
+    ];
+    const history = Array.from({ length: 20 }, (_, index) =>
+      trade({
+        proxyWallet: wallet,
+        conditionId: `0xhistory${index}`,
+        slug: `btc-updown-5m-${1000 + index * 300}`,
+        title: "Bitcoin Up or Down",
+        timestamp: 1010 + index * 300,
+        outcome: "Up",
+        asset: "up-token",
+        size: 10,
+        usdcSize: 4,
+        price: 0.4
+      })
+    );
+    const gammaCalls: string[] = [];
+    const service = new ScannerService({
+      now: () => 3020,
+      client: {
+        getShortTermBtcMarkets: async () => [liveMarket],
+        getTradesByMarkets: async () => liveTrades,
+        getLeaderboardTraders: async () => [],
+        getActivityRange: async () => history,
+        getGammaMarketBySlug: async (slug) => {
+          gammaCalls.push(slug);
+          return gammaMarket({
+            conditionId: history.find((item) => item.slug === slug)?.conditionId,
+            slug,
+            closed: true,
+            outcomePrices: "[\"1\",\"0\"]"
+          });
+        }
+      }
+    });
+
+    await service.scanOnce();
+    expect(service.getSnapshot().candidates).toHaveLength(1);
+    expect(gammaCalls).toHaveLength(20);
+
+    liveMarket = secondMarket;
+    liveTrades = [
+      trade({
+        proxyWallet: wallet,
+        conditionId: liveMarket.conditionId,
+        slug: liveMarket.slug,
+        title: liveMarket.title,
+        timestamp: liveMarket.startTimestamp + 10,
+        outcome: "Up",
+        asset: "up-token",
+        size: 30,
+        usdcSize: 16.2,
+        price: 0.54
+      })
+    ];
+    await service.scanOnce();
+    expect(gammaCalls).toHaveLength(20);
+  });
+
+  it("preserves tickets and executions across later empty scans", async () => {
+    let trades = [
+      trade({
+        proxyWallet: "0x1111111111111111111111111111111111111111",
+        conditionId: scanMarket.conditionId,
+        slug: scanMarket.slug,
+        title: scanMarket.title,
+        timestamp: 3010,
+        outcome: "Up",
+        asset: "up-token",
+        size: 30,
+        usdcSize: 16.2,
+        price: 0.54
+      })
+    ];
+    const service = new ScannerService({
+      now: () => 3020,
+      client: {
+        getShortTermBtcMarkets: async () => [scanMarket],
+        getTradesByMarkets: async () => trades,
+        getLeaderboardTraders: async () => [],
+        getActivityRange: async () => [],
+        getGammaMarketBySlug: async () => undefined
+      },
+      summarizeHistory: async () => candidateSummary()
+    });
+
+    await service.scanOnce();
+    const ticket = service.getSnapshot().tickets[0];
+    service.recordExecution({
+      id: "execution-1",
+      ticketId: ticket.id,
+      status: "dry_run",
+      message: "recorded",
+      createdAt: 3021
+    });
+
+    trades = [];
+    await service.scanOnce();
+
+    expect(service.getSnapshot().tickets).toContainEqual(ticket);
+    expect(service.getSnapshot().executions).toHaveLength(1);
+  });
 });
+
+function scannerClient(markets: MarketMetadata[], trades: ActivityTrade[]) {
+  return {
+    getShortTermBtcMarkets: async () => markets,
+    getTradesByMarkets: async () => trades,
+    getLeaderboardTraders: async () => [],
+    getActivityRange: async () => [],
+    getGammaMarketBySlug: async () => undefined
+  };
+}
 
 function candidateSummary(overrides: Partial<CandidateSummary> = {}): CandidateSummary {
   return {
