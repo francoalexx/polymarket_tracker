@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { marketMetadataFromGammaMarket } from "../server/polymarketClient";
+import { ScannerService } from "../server/scannerService";
 import { analyzeCandidate, isBtcFiveMinuteTrade } from "../shared/candidateScanner";
 import {
   buildEntryTicket,
@@ -555,6 +556,56 @@ describe("hybrid copy trader pure logic", () => {
     });
     expect(flooredExit.limitPrice).toBe(0.05);
     expect(flooredExit.size).toBe(12.123456789);
+  });
+});
+
+describe("scanner service", () => {
+  it("promotes strict live candidates and creates entry tickets", async () => {
+    const market: MarketMetadata = {
+      conditionId: "0xscan",
+      slug: "btc-updown-5m-3000",
+      title: "Bitcoin Up or Down",
+      marketType: "5m",
+      startTimestamp: 3000,
+      endTimestamp: 3300,
+      outcomes: [{ name: "Up", tokenId: "up-token", price: 0.54 }],
+      minTickSize: 0.01,
+      negRisk: false
+    };
+
+    const service = new ScannerService({
+      now: () => 3020,
+      intervalMs: 60_000,
+      client: {
+        getShortTermBtcMarkets: async () => [market],
+        getTradesByMarkets: async () => [
+          trade({
+            proxyWallet: "0x1111111111111111111111111111111111111111",
+            conditionId: "0xscan",
+            slug: market.slug,
+            title: market.title,
+            timestamp: 3010,
+            outcome: "Up",
+            asset: "up-token",
+            size: 30,
+            usdcSize: 16.2,
+            price: 0.54
+          })
+        ],
+        getLeaderboardTraders: async () => [],
+        getActivityRange: async () => [],
+        getGammaMarketBySlug: async () => undefined
+      },
+      summarizeHistory: async () => candidateSummary({ proxyWallet: "0x1111111111111111111111111111111111111111" })
+    });
+
+    await service.scanOnce();
+    const snapshot = service.getSnapshot();
+
+    expect(snapshot.candidates).toHaveLength(1);
+    expect(snapshot.candidates[0].recommendation).toBe("prepare_entry");
+    expect(snapshot.tickets).toHaveLength(1);
+    expect(snapshot.tickets[0].limitPrice).toBe(0.59);
   });
 });
 

@@ -1,9 +1,13 @@
 import express from "express";
 import { normalizeWallet, isValidWallet } from "../shared/polymarket";
+import { ScannerService } from "./scannerService";
 import { StreamSession } from "./streamSession";
 
 const PORT = Number(process.env.PORT ?? 5174);
 const app = express();
+const scannerService = new ScannerService();
+
+scannerService.start();
 
 app.get("/api/health", (_request, response) => {
   response.json({
