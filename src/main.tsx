@@ -1,9 +1,10 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { Activity, AlertCircle, Bell, CircleDollarSign, Plus, Radio, Trash2, WifiOff } from "lucide-react";
+import { Activity, AlertCircle, Bell, CheckCircle2, CircleDollarSign, Clock3, Plus, Radio, RadioTower, Send, ShieldCheck, Trash2, WifiOff, XCircle } from "lucide-react";
 import { DEFAULT_TRACKED_WALLETS, DEFAULT_WALLET, YWS1_WALLET } from "../shared/types";
-import type { ActivityTrade, GroupedPosition, PriceUpdate, StatusPayload } from "../shared/types";
+import type { ActivityTrade, CandidateFeedItem, GroupedPosition, PreparedTradeTicket, PriceUpdate, ScannerSnapshot, StatusPayload } from "../shared/types";
 import { isValidWallet, normalizeWallet } from "../shared/polymarket";
+import { cancelTicket, confirmTicket, connectScannerStream } from "./scannerApi";
 import "./styles.css";
 
 type StreamError = { message: string; receivedAt: number };
@@ -29,6 +30,8 @@ function App() {
   const [expanded, setExpanded] = React.useState<Set<string>>(new Set());
   const [highlightedTrades, setHighlightedTrades] = React.useState<Set<string>>(new Set());
   const [soundEnabled, setSoundEnabled] = React.useState(true);
+  const [scannerSnapshot, setScannerSnapshot] = React.useState<ScannerSnapshot | null>(null);
+  const [selectedCandidateWallet, setSelectedCandidateWallet] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     localStorage.setItem(TARGETS_KEY, JSON.stringify(targets));
@@ -37,6 +40,17 @@ function App() {
   React.useEffect(() => {
     localStorage.setItem(SELECTED_KEY, selectedWallet);
   }, [selectedWallet]);
+
+  React.useEffect(() => {
+    const source = connectScannerStream(
+      (snapshot) => {
+        setScannerSnapshot(snapshot);
+        if (snapshot.status !== "error") setError(null);
+      },
+      (message) => setError({ message, receivedAt: Date.now() })
+    );
+    return () => source.close();
+  }, []);
 
   React.useEffect(() => {
     let source: EventSource | null = null;
@@ -195,6 +209,24 @@ function App() {
         <Metric label="Last update" value={relativeTime(status.receivedAt)} />
       </section>
 
+      <section className="scanner-grid">
+        <CandidateFeed
+          snapshot={scannerSnapshot}
+          selectedWallet={selectedCandidateWallet}
+          onSelect={(candidate) => {
+            setSelectedCandidateWallet(candidate.wallet);
+            setTargets((current) => Array.from(new Set([...current, candidate.wallet])));
+            setSelectedWallet(candidate.wallet);
+          }}
+        />
+        <TicketQueue
+          tickets={scannerSnapshot?.tickets ?? []}
+          onConfirm={(id) => confirmTicket(id).catch((error) => setError({ message: error.message, receivedAt: Date.now() }))}
+          onCancel={(id) => cancelTicket(id).catch((error) => setError({ message: error.message, receivedAt: Date.now() }))}
+        />
+        <ExecutionLog entries={scannerSnapshot?.executions ?? []} />
+      </section>
+
       <section className="main-grid">
         <div className="positions-panel">
           <header className="panel-header">
@@ -315,6 +347,128 @@ function PositionTable({
       </table>
     </div>
   );
+}
+
+function CandidateFeed({
+  snapshot,
+  selectedWallet,
+  onSelect
+}: {
+  snapshot: ScannerSnapshot | null;
+  selectedWallet: string | null;
+  onSelect: (candidate: CandidateFeedItem) => void;
+}) {
+  const candidates = snapshot?.candidates ?? [];
+  const latency = snapshot?.latency;
+  const headerText = latency
+    ? `${latency.activeMarketType} active / ${latency.medianLatencySeconds}s median`
+    : "Starting scanner";
+
+  return (
+    <section className="scanner-panel candidate-feed">
+      <header className="panel-header">
+        <h2><RadioTower size={16} /> Candidate feed</h2>
+        <span>{headerText}</span>
+      </header>
+      <div className="candidate-list">
+        {candidates.length === 0 ? <EmptyState text={snapshot?.message ?? "Starting scanner."} /> : null}
+        {candidates.map((candidate) => (
+          <button
+            className={candidate.wallet === selectedWallet ? "candidate-row active" : "candidate-row"}
+            key={`${candidate.wallet}:${candidate.signal.market.conditionId}:${candidate.signal.candidateTradeId}`}
+            onClick={() => onSelect(candidate)}
+          >
+            <div>
+              <strong>{walletLabel(candidate.wallet)}</strong>
+              <span>{candidate.signal.market.title}</span>
+            </div>
+            <div className="candidate-badges">
+              <Badge>{candidate.marketType}</Badge>
+              <Badge>{candidate.source}</Badge>
+              <Badge>{candidate.recommendation.replace("_", " ")}</Badge>
+              {candidate.strictPass ? <Badge icon={<ShieldCheck size={13} />}>strict pass</Badge> : null}
+            </div>
+            <div className="candidate-stats">
+              <span>Score {candidate.score.toFixed(1)}</span>
+              <span>{candidate.outcome}</span>
+              <span>{candidate.latencySeconds}s lag</span>
+            </div>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function TicketQueue({
+  tickets,
+  onConfirm,
+  onCancel
+}: {
+  tickets: PreparedTradeTicket[];
+  onConfirm: (id: string) => void;
+  onCancel: (id: string) => void;
+}) {
+  const pendingCount = tickets.filter((ticket) => ticket.status === "pending").length;
+
+  return (
+    <section className="scanner-panel ticket-queue">
+      <header className="panel-header">
+        <h2><CheckCircle2 size={16} /> Trade tickets</h2>
+        <span>{pendingCount} pending</span>
+      </header>
+      <div className="ticket-list">
+        {tickets.length === 0 ? <EmptyState text="No prepared tickets." /> : null}
+        {tickets.map((ticket) => (
+          <article className="ticket-card" key={ticket.id}>
+            <div>
+              <strong>{ticket.kind.toUpperCase()} {ticket.outcome}</strong>
+              <span>{ticket.market.title}</span>
+            </div>
+            <div className="ticket-meta">
+              <span>limit {formatPercent(ticket.limitPrice)}</span>
+              <span>{formatNumber(ticket.size)} shares</span>
+              {ticket.spendUsdc ? <span>{formatCurrency(ticket.spendUsdc)}</span> : null}
+              <span>{ticket.status}</span>
+            </div>
+            <div className="ticket-actions">
+              <button onClick={() => onConfirm(ticket.id)} disabled={ticket.status !== "pending"} title="Confirm ticket" aria-label="Confirm ticket">
+                <Send size={16} />
+              </button>
+              <button onClick={() => onCancel(ticket.id)} disabled={ticket.status !== "pending"} title="Cancel ticket" aria-label="Cancel ticket">
+                <XCircle size={16} />
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ExecutionLog({ entries }: { entries: ScannerSnapshot["executions"] }) {
+  return (
+    <section className="scanner-panel execution-log">
+      <header className="panel-header">
+        <h2><Clock3 size={16} /> Execution log</h2>
+        <span>{entries.length} events</span>
+      </header>
+      <div className="execution-list">
+        {entries.length === 0 ? <EmptyState text="No executions yet." /> : null}
+        {entries.map((entry) => (
+          <article className="execution-row" key={entry.id}>
+            <strong>{entry.status}</strong>
+            <span>{entry.message}</span>
+            <span>{relativeTime(entry.createdAt)}</span>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function Badge({ children, icon }: { children: React.ReactNode; icon?: React.ReactNode }) {
+  return <span className="badge">{icon}{children}</span>;
 }
 
 function Metric({ icon, label, value, tone }: { icon?: React.ReactNode; label: string; value: string; tone?: "good" | "bad" }) {

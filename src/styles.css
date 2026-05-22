@@ -71,6 +71,10 @@ h2 {
   font-size: 1rem;
 }
 
+h2 svg {
+  flex: 0 0 auto;
+}
+
 .status-pill,
 .wallet-chip,
 .wallet-input button,
@@ -235,6 +239,119 @@ h2 {
   font-size: 0.85rem;
 }
 
+.panel-header h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scanner-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.9fr) minmax(260px, 0.7fr);
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 16px;
+}
+
+.scanner-panel {
+  min-height: 260px;
+  overflow: hidden;
+  background: rgba(21, 26, 34, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+}
+
+.candidate-list,
+.ticket-list,
+.execution-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.candidate-row {
+  width: 100%;
+  padding: 14px 16px;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  background: transparent;
+  color: #edf2f8;
+  text-align: left;
+}
+
+.candidate-row.active,
+.candidate-row:hover {
+  background: rgba(156, 215, 255, 0.1);
+}
+
+.candidate-row strong,
+.candidate-row span,
+.ticket-card strong,
+.ticket-card span,
+.execution-row strong,
+.execution-row span {
+  display: block;
+}
+
+.candidate-row div:first-child span,
+.ticket-card div:first-child span,
+.execution-row span {
+  color: #98a8ba;
+  font-size: 0.82rem;
+}
+
+.candidate-badges,
+.candidate-stats,
+.ticket-meta,
+.ticket-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.badge,
+.candidate-stats span,
+.ticket-meta span {
+  min-height: 24px;
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #b9c7d6;
+  font-size: 0.78rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ticket-card,
+.execution-row {
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.ticket-actions button {
+  width: 34px;
+  height: 32px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: #edf2f8;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ticket-actions button:not(:disabled):hover {
+  background: rgba(156, 215, 255, 0.14);
+}
+
+.ticket-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .table-wrap {
   overflow: auto;
 }
@@ -381,7 +498,8 @@ tbody tr.pinned.pending {
 
 @media (max-width: 1100px) {
   .controls-band,
-  .main-grid {
+  .main-grid,
+  .scanner-grid {
     grid-template-columns: 1fr;
   }
 
