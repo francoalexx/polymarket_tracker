@@ -1,12 +1,16 @@
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import express from "express";
 import { describe, expect, it } from "vitest";
 import { marketMetadataFromGammaMarket } from "../server/polymarketClient";
+import { confirmTicket, registerScannerRoutes, scannerEventPayload } from "../server/scannerRoutes";
 import { ScannerService } from "../server/scannerService";
 import {
   PythonTradingProvider,
+  type TradingProvider,
   buildTradingProviderCommand,
   executionFromProviderResponse,
   parseTradingProviderResponse,
@@ -1106,6 +1110,166 @@ describe("trading provider bridge", () => {
   });
 });
 
+describe("scanner routes", () => {
+  it("serializes scanner SSE payloads", () => {
+    const payload = scannerEventPayload({
+      status: "live",
+      message: "ok",
+      receivedAt: 1,
+      latency: { activeMarketType: "5m", isDegraded: false, medianLatencySeconds: 3 },
+      candidates: [],
+      tickets: [],
+      executions: []
+    });
+
+    expect(payload).toBe(
+      'event: scanner_snapshot\ndata: {"status":"live","message":"ok","receivedAt":1,"latency":{"activeMarketType":"5m","isDegraded":false,"medianLatencySeconds":3},"candidates":[],"tickets":[],"executions":[]}\n\n'
+    );
+  });
+
+  it("confirms pending tickets through the trading provider and records execution", async () => {
+    const service = await scannerWithTicket();
+    const ticket = service.getSnapshot().tickets[0];
+    const submittedStatuses: Array<PreparedTradeTicket["status"]> = [];
+    const provider: TradingProvider = {
+      status: () => ({ mode: "dry_run", ready: true, message: "ready" }),
+      submit: async (submittedTicket) => {
+        submittedStatuses.push(submittedTicket.status);
+        return { status: "dry_run", message: "ok", response: { id: "dry-run" } };
+      }
+    };
+
+    const result = await confirmTicket(service, provider, ticket.id);
+
+    expect(result?.ticket.status).toBe("submitted");
+    expect(result?.execution.status).toBe("dry_run");
+    expect(submittedStatuses).toEqual(["confirmed"]);
+    expect(service.getSnapshot().executions).toHaveLength(1);
+  });
+
+  it("rejects tickets when the provider returns an error execution", async () => {
+    const service = await scannerWithTicket();
+    const ticket = service.getSnapshot().tickets[0];
+    const provider: TradingProvider = {
+      status: () => ({ mode: "dry_run", ready: true, message: "ready" }),
+      submit: async () => ({ status: "error", message: "bridge failed" })
+    };
+
+    const result = await confirmTicket(service, provider, ticket.id);
+
+    expect(result?.ticket.status).toBe("rejected");
+    expect(result?.execution.status).toBe("error");
+    expect(service.getSnapshot().executions[0].message).toBe("bridge failed");
+  });
+
+  it("does not confirm missing or non-pending tickets", async () => {
+    const service = await scannerWithTicket({ status: "cancelled" });
+    const provider: TradingProvider = {
+      status: () => ({ mode: "dry_run", ready: true, message: "ready" }),
+      submit: async () => {
+        throw new Error("should not submit");
+      }
+    };
+
+    await expect(confirmTicket(service, provider, "missing")).resolves.toBeUndefined();
+    await expect(confirmTicket(service, provider, service.getSnapshot().tickets[0].id)).resolves.toBeUndefined();
+  });
+
+  it("marks tickets rejected when the provider throws", async () => {
+    const service = await scannerWithTicket();
+    const ticket = service.getSnapshot().tickets[0];
+    const provider: TradingProvider = {
+      status: () => ({ mode: "dry_run", ready: true, message: "ready" }),
+      submit: async () => {
+        throw new Error("provider exploded");
+      }
+    };
+
+    await expect(confirmTicket(service, provider, ticket.id)).rejects.toThrow(/provider exploded/);
+    expect(ticket.status).toBe("rejected");
+    expect(service.getSnapshot().executions[0].status).toBe("error");
+  });
+
+  it("serves candidate and trading status snapshots over registered routes", async () => {
+    const service = await scannerWithTicket();
+    const app = express();
+    app.use(express.json());
+    registerScannerRoutes(app, service, routeProvider());
+
+    await withServer(app, async (baseUrl) => {
+      const candidates = (await fetchJson(`${baseUrl}/api/candidates`)) as { tickets: PreparedTradeTicket[] };
+      const tradingStatus = await fetchJson(`${baseUrl}/api/trading/status`);
+
+      expect(candidates.tickets).toHaveLength(1);
+      expect(candidates.tickets[0].status).toBe("pending");
+      expect(tradingStatus).toEqual({ mode: "dry_run", ready: true, message: "ready" });
+    });
+  });
+
+  it("cancels and confirms tickets over registered routes", async () => {
+    const cancelService = await scannerWithTicket();
+    const cancelTicketId = cancelService.getSnapshot().tickets[0].id;
+    const cancelApp = express();
+    cancelApp.use(express.json());
+    registerScannerRoutes(cancelApp, cancelService, routeProvider());
+
+    await withServer(cancelApp, async (baseUrl) => {
+      const cancelled = (await fetchJson(`${baseUrl}/api/tickets/${encodeURIComponent(cancelTicketId)}/cancel`, {
+        method: "POST"
+      })) as PreparedTradeTicket;
+      const repeatedCancel = await fetch(`${baseUrl}/api/tickets/${encodeURIComponent(cancelTicketId)}/cancel`, {
+        method: "POST"
+      });
+      const repeatedCancelBody = (await repeatedCancel.json()) as PreparedTradeTicket;
+
+      expect(cancelled.status).toBe("cancelled");
+      expect(repeatedCancel.status).toBe(200);
+      expect(repeatedCancelBody.status).toBe("cancelled");
+    });
+
+    const confirmService = await scannerWithTicket();
+    const confirmTicketId = confirmService.getSnapshot().tickets[0].id;
+    const confirmApp = express();
+    confirmApp.use(express.json());
+    registerScannerRoutes(confirmApp, confirmService, routeProvider());
+
+    await withServer(confirmApp, async (baseUrl) => {
+      const confirmed = (await fetchJson(`${baseUrl}/api/tickets/${encodeURIComponent(confirmTicketId)}/confirm`, {
+        method: "POST"
+      })) as { ticket: PreparedTradeTicket; execution: { status: string } };
+      const repeatedConfirm = await fetch(`${baseUrl}/api/tickets/${encodeURIComponent(confirmTicketId)}/confirm`, {
+        method: "POST"
+      });
+
+      expect(confirmed.ticket.status).toBe("submitted");
+      expect(confirmed.execution.status).toBe("dry_run");
+      expect(repeatedConfirm.status).toBe(404);
+    });
+  });
+
+  it("streams scanner snapshots over SSE", async () => {
+    const service = await scannerWithTicket();
+    const app = express();
+    app.use(express.json());
+    registerScannerRoutes(app, service, routeProvider());
+
+    await withServer(app, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/scanner/stream`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/event-stream");
+
+      const reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      const chunk = await reader!.read();
+      const text = new TextDecoder().decode(chunk.value);
+      await reader!.cancel().catch(() => undefined);
+
+      expect(text).toContain("event: scanner_snapshot");
+      expect(text).toContain("\"tickets\"");
+    });
+  });
+});
+
 function scannerClient(markets: MarketMetadata[], trades: ActivityTrade[]) {
   return {
     getShortTermBtcMarkets: async () => markets,
@@ -1172,6 +1336,76 @@ function tradeTicket(overrides: Partial<PreparedTradeTicket> = {}): PreparedTrad
     expiresAt: 2300,
     ...overrides
   };
+}
+
+async function scannerWithTicket(ticketOverrides: Partial<PreparedTradeTicket> = {}): Promise<ScannerService> {
+  const market: MarketMetadata = {
+    conditionId: "0xroute",
+    slug: "btc-updown-5m-4000",
+    title: "Bitcoin Up or Down",
+    marketType: "5m",
+    startTimestamp: 4000,
+    endTimestamp: 4300,
+    outcomes: [{ name: "Up", tokenId: "up-token", price: 0.54 }],
+    minTickSize: 0.01,
+    negRisk: false
+  };
+  const service = new ScannerService({
+    now: () => 4020,
+    client: scannerClient(
+      [market],
+      [
+        trade({
+          proxyWallet: "0x1111111111111111111111111111111111111111",
+          conditionId: market.conditionId,
+          slug: market.slug,
+          title: market.title,
+          timestamp: 4010,
+          outcome: "Up",
+          asset: "up-token",
+          size: 30,
+          usdcSize: 16.2,
+          price: 0.54
+        })
+      ]
+    ),
+    summarizeHistory: async () => candidateSummary()
+  });
+  await service.scanOnce();
+  Object.assign(service.getSnapshot().tickets[0], ticketOverrides);
+  return service;
+}
+
+function routeProvider(): TradingProvider {
+  return {
+    status: () => ({ mode: "dry_run", ready: true, message: "ready" }),
+    submit: async () => ({ status: "dry_run", message: "ok", response: { id: "dry-run" } })
+  };
+}
+
+async function withServer(app: express.Express, run: (baseUrl: string) => Promise<void>): Promise<void> {
+  const server = await new Promise<Server>((resolve) => {
+    const listeningServer = app.listen(0, () => resolve(listeningServer));
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected test server to listen on an ephemeral TCP port");
+  }
+
+  try {
+    await run(`http://127.0.0.1:${address.port}`);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+}
+
+async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
+  const response = await fetch(url, init);
+  expect(response.ok).toBe(true);
+  return response.json();
 }
 
 function fakePython(source: string): string {

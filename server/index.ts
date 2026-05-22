@@ -1,5 +1,6 @@
 import express from "express";
 import { normalizeWallet, isValidWallet } from "../shared/polymarket";
+import { registerScannerRoutes } from "./scannerRoutes";
 import { ScannerService } from "./scannerService";
 import { StreamSession } from "./streamSession";
 
@@ -8,6 +9,9 @@ const app = express();
 const scannerService = new ScannerService();
 
 scannerService.start();
+
+app.use(express.json());
+registerScannerRoutes(app, scannerService);
 
 app.get("/api/health", (_request, response) => {
   response.json({
