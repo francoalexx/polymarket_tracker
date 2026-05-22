@@ -171,19 +171,26 @@ export function marketMetadataFromGammaMarket(market: GammaMarket, marketType: M
   const tokenIds = readJsonArray(market.clobTokenIds ?? "[]").map(String);
   const prices = readJsonArray(market.outcomePrices).map((price) => Number(price));
   if (outcomes.length === 0 || outcomes.length !== tokenIds.length) return undefined;
+  if (prices.length !== outcomes.length || prices.some((price) => !Number.isFinite(price))) return undefined;
 
-  const startValue = market.startDate ?? market.eventStartTime ?? getStartIsoFromSlug(market.slug);
+  const startValue = market.eventStartTime ?? getStartIsoFromSlug(market.slug) ?? market.startDate;
   if (!startValue || !market.endDate) return undefined;
+  const startTimestamp = Math.floor(Date.parse(startValue) / 1000);
+  const endTimestamp = Math.floor(Date.parse(market.endDate) / 1000);
+  if (!Number.isFinite(startTimestamp) || !Number.isFinite(endTimestamp)) return undefined;
+
+  const parsedMinTickSize = Number(market.orderPriceMinTickSize);
+  const minTickSize = Number.isFinite(parsedMinTickSize) && parsedMinTickSize > 0 ? parsedMinTickSize : 0.01;
 
   return {
     conditionId: market.conditionId,
     slug: market.slug,
     title: market.question,
     marketType,
-    startTimestamp: Math.floor(Date.parse(startValue) / 1000),
-    endTimestamp: Math.floor(Date.parse(market.endDate) / 1000),
+    startTimestamp,
+    endTimestamp,
     outcomes: outcomes.map((name, index) => ({ name, tokenId: tokenIds[index], price: prices[index] })),
-    minTickSize: Number(market.orderPriceMinTickSize ?? 0.01),
+    minTickSize,
     negRisk: Boolean(market.negRisk)
   };
 }

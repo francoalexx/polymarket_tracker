@@ -12,7 +12,7 @@ import {
 } from "../shared/copyTrader";
 import { getActivityId, groupPositions, isShortTermCryptoMarket, isValidWallet, normalizeWallet } from "../shared/polymarket";
 import type { CandidateSummary } from "../shared/candidateScanner";
-import type { ActivityTrade, PositionLeg } from "../shared/types";
+import type { ActivityTrade, GammaMarket, PositionLeg } from "../shared/types";
 import type { CopyTraderConfig, MarketMetadata, SignalCooldownKey } from "../shared/types";
 
 describe("wallet helpers", () => {
@@ -181,6 +181,7 @@ describe("Polymarket live market metadata", () => {
         negRisk: false,
         active: true,
         acceptingOrders: true,
+        eventStartTime: "2026-05-21T12:00:00Z",
         startDate: "2026-05-21T12:00:00Z"
       },
       "5m"
@@ -200,6 +201,67 @@ describe("Polymarket live market metadata", () => {
       minTickSize: 0.01,
       negRisk: false
     });
+  });
+
+  it("prefers eventStartTime over older startDate and slug timestamps", () => {
+    const market = marketMetadataFromGammaMarket(
+      gammaMarket({
+        slug: "btc-updown-5m-1778315400",
+        eventStartTime: "2026-05-21T12:02:00Z",
+        startDate: "2026-05-20T12:00:00Z",
+        endDate: "2026-05-21T12:07:00Z"
+      }),
+      "5m"
+    );
+
+    expect(market?.startTimestamp).toBe(1779364920);
+    expect(market?.endTimestamp).toBe(1779365220);
+  });
+
+  it("falls back to the slug timestamp before startDate", () => {
+    const market = marketMetadataFromGammaMarket(
+      gammaMarket({
+        slug: "btc-updown-5m-1778315400",
+        startDate: "2026-05-20T12:00:00Z"
+      }),
+      "5m"
+    );
+
+    expect(market?.startTimestamp).toBe(1778315400);
+  });
+
+  it("skips closed, inactive, and non-orderable Gamma markets", () => {
+    expect(marketMetadataFromGammaMarket(gammaMarket({ closed: true }), "5m")).toBeUndefined();
+    expect(marketMetadataFromGammaMarket(gammaMarket({ active: false }), "5m")).toBeUndefined();
+    expect(marketMetadataFromGammaMarket(gammaMarket({ acceptingOrders: false }), "5m")).toBeUndefined();
+  });
+
+  it("skips markets with malformed, mismatched, or non-finite prices", () => {
+    expect(marketMetadataFromGammaMarket(gammaMarket({ outcomePrices: "not-json" }), "5m")).toBeUndefined();
+    expect(marketMetadataFromGammaMarket(gammaMarket({ outcomePrices: "[\"0.54\"]" }), "5m")).toBeUndefined();
+    expect(marketMetadataFromGammaMarket(gammaMarket({ outcomePrices: "[\"0.54\",\"NaN\"]" }), "5m")).toBeUndefined();
+  });
+
+  it("skips markets with invalid start or end dates", () => {
+    expect(marketMetadataFromGammaMarket(gammaMarket({ slug: "btc-updown-5m-invalid", eventStartTime: "not-a-date" }), "5m")).toBeUndefined();
+    expect(marketMetadataFromGammaMarket(gammaMarket({ endDate: "not-a-date" }), "5m")).toBeUndefined();
+  });
+
+  it("defaults invalid min tick sizes and missing negative risk", () => {
+    const missing = marketMetadataFromGammaMarket(
+      gammaMarket({
+        negRisk: undefined,
+        orderPriceMinTickSize: undefined
+      }),
+      "5m"
+    );
+    const invalid = marketMetadataFromGammaMarket(gammaMarket({ orderPriceMinTickSize: "not-a-number" }), "5m");
+    const nonPositive = marketMetadataFromGammaMarket(gammaMarket({ orderPriceMinTickSize: 0 }), "5m");
+
+    expect(missing?.minTickSize).toBe(0.01);
+    expect(missing?.negRisk).toBe(false);
+    expect(invalid?.minTickSize).toBe(0.01);
+    expect(nonPositive?.minTickSize).toBe(0.01);
   });
 });
 
@@ -505,6 +567,23 @@ function candidateSummary(overrides: Partial<CandidateSummary> = {}): CandidateS
     averageFirstEntrySeconds: 40,
     copyabilityScore: 80,
     markets: [],
+    ...overrides
+  };
+}
+
+function gammaMarket(overrides: Partial<GammaMarket> = {}): GammaMarket {
+  return {
+    question: "Bitcoin Up or Down",
+    conditionId: "0xcondition",
+    slug: "btc-updown-5m-1779364800",
+    endDate: "2026-05-21T12:05:00Z",
+    outcomes: "[\"Up\",\"Down\"]",
+    outcomePrices: "[\"0.54\",\"0.46\"]",
+    closed: false,
+    clobTokenIds: "[\"up-token\",\"down-token\"]",
+    orderPriceMinTickSize: 0.01,
+    active: true,
+    acceptingOrders: true,
     ...overrides
   };
 }
