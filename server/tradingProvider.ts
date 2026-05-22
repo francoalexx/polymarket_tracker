@@ -125,6 +125,15 @@ export class PythonTradingProvider implements TradingProvider {
         callback();
       };
 
+      const stopRetainingOutput = () => {
+        child.stdout.off("data", onStdoutData);
+        child.stderr.off("data", onStderrData);
+        child.stdout.pause();
+        child.stderr.pause();
+        child.stdout.destroy();
+        child.stderr.destroy();
+      };
+
       const cleanupChild = () => {
         if (child.killed || child.exitCode !== null || child.signalCode !== null) return;
         child.kill("SIGTERM");
@@ -138,29 +147,37 @@ export class PythonTradingProvider implements TradingProvider {
 
       const resolveGuard = (message: string) => {
         settle(() => {
+          stopRetainingOutput();
           cleanupChild();
           resolve({ status: "error", message });
         });
       };
 
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => {
-        stdout += chunk;
-        if (Buffer.byteLength(stdout, "utf8") > this.maxOutputBytes) {
+      const onStdoutData = (chunk: string) => {
+        if (settled) return;
+        const next = appendWithinLimit(stdout, chunk, this.maxOutputBytes);
+        stdout = next.value;
+        if (next.exceeded) {
           resolveGuard("Trading bridge stdout exceeded output limit.");
         }
-      });
-      child.stderr.on("data", (chunk: string) => {
-        stderr += chunk;
-        if (Buffer.byteLength(stderr, "utf8") > this.maxOutputBytes) {
+      };
+      const onStderrData = (chunk: string) => {
+        if (settled) return;
+        const next = appendWithinLimit(stderr, chunk, this.maxOutputBytes);
+        stderr = next.value;
+        if (next.exceeded) {
           resolveGuard("Trading bridge stderr exceeded output limit.");
         }
-      });
+      };
+
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", onStdoutData);
+      child.stderr.on("data", onStderrData);
       child.on("error", (error) => {
         settle(() => reject(new Error(sanitizeTradingProviderText(error.message))));
       });
-      child.on("close", (code) => {
+      child.on("close", (code, signal) => {
         settle(() => {
           const raw = stdout.trim();
           const stderrMessage = stderr.trim() ? ` ${truncateStderr(stderr)}` : "";
@@ -174,6 +191,15 @@ export class PythonTradingProvider implements TradingProvider {
                 `${error instanceof Error ? error.message : String(error)}${stderrMessage}`
               )
             );
+            return;
+          }
+
+          if (signal && parsed.status !== "error") {
+            resolve({
+              ...parsed,
+              status: "error",
+              message: sanitizeTradingProviderText(`Trading bridge terminated by signal ${signal}: ${parsed.message}`)
+            });
             return;
           }
 
@@ -193,6 +219,16 @@ export class PythonTradingProvider implements TradingProvider {
       child.stdin.end(payload);
     });
   }
+}
+
+function appendWithinLimit(current: string, chunk: string, maxBytes: number): { value: string; exceeded: boolean } {
+  const available = maxBytes - Buffer.byteLength(current, "utf8");
+  if (available <= 0) return { value: current, exceeded: true };
+
+  const chunkBytes = Buffer.byteLength(chunk, "utf8");
+  if (chunkBytes <= available) return { value: current + chunk, exceeded: false };
+
+  return { value: current + Buffer.from(chunk).subarray(0, available).toString("utf8"), exceeded: true };
 }
 
 export function executionFromProviderResponse(

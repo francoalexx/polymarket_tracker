@@ -1026,6 +1026,22 @@ describe("trading provider bridge", () => {
     }
   });
 
+  it("turns signal-terminated successful-looking bridge output into an error response", async () => {
+    const previousPython = process.env.PYTHON_BIN;
+    const fake = fakePython(
+      'process.stdout.write(JSON.stringify({ status: "submitted", message: "ok", response: { id: "abc" } })); process.kill(process.pid, "SIGTERM");'
+    );
+    process.env.PYTHON_BIN = fake;
+    try {
+      const result = await new PythonTradingProvider().submit(tradeTicket());
+      expect(result.status).toBe("error");
+      expect(result.message).toMatch(/terminated by signal SIGTERM/);
+      expect(result.response).toEqual({ id: "abc" });
+    } finally {
+      restoreEnv("PYTHON_BIN", previousPython);
+    }
+  });
+
   it("redacts and truncates stderr when bridge output is invalid", async () => {
     const previousPython = process.env.PYTHON_BIN;
     const previousSecret = process.env.POLYMARKET_PRIVATE_KEY;
@@ -1063,6 +1079,26 @@ describe("trading provider bridge", () => {
 
       expect(result.status).toBe("error");
       expect(result.message).toMatch(/timed out/);
+      expect(Date.now() - startedAt).toBeLessThan(500);
+    } finally {
+      restoreEnv("PYTHON_BIN", previousPython);
+    }
+  });
+
+  it("returns promptly when noisy bridge ignores SIGTERM after output cap", async () => {
+    const previousPython = process.env.PYTHON_BIN;
+    const fake = fakePython(
+      'process.on("SIGTERM", () => {}); setInterval(() => process.stdout.write("x".repeat(4096)), 1);'
+    );
+    process.env.PYTHON_BIN = fake;
+    try {
+      const startedAt = Date.now();
+      const result = await new PythonTradingProvider({ timeoutMs: 10_000, killGraceMs: 30, maxOutputBytes: 1024 }).submit(
+        tradeTicket()
+      );
+
+      expect(result.status).toBe("error");
+      expect(result.message).toMatch(/stdout exceeded output limit/);
       expect(Date.now() - startedAt).toBeLessThan(500);
     } finally {
       restoreEnv("PYTHON_BIN", previousPython);
