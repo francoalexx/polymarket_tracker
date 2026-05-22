@@ -230,6 +230,18 @@ describe("Polymarket live market metadata", () => {
     expect(market?.startTimestamp).toBe(1778315400);
   });
 
+  it("ignores absurd slug timestamps and falls back to startDate", () => {
+    const market = marketMetadataFromGammaMarket(
+      gammaMarket({
+        slug: "btc-updown-5m-999999999999999999999999999999",
+        startDate: "2026-05-21T12:00:00Z"
+      }),
+      "5m"
+    );
+
+    expect(market?.startTimestamp).toBe(1779364800);
+  });
+
   it("skips closed, inactive, and non-orderable Gamma markets", () => {
     expect(marketMetadataFromGammaMarket(gammaMarket({ closed: true }), "5m")).toBeUndefined();
     expect(marketMetadataFromGammaMarket(gammaMarket({ active: false }), "5m")).toBeUndefined();
@@ -240,6 +252,9 @@ describe("Polymarket live market metadata", () => {
     expect(marketMetadataFromGammaMarket(gammaMarket({ outcomePrices: "not-json" }), "5m")).toBeUndefined();
     expect(marketMetadataFromGammaMarket(gammaMarket({ outcomePrices: "[\"0.54\"]" }), "5m")).toBeUndefined();
     expect(marketMetadataFromGammaMarket(gammaMarket({ outcomePrices: "[\"0.54\",\"NaN\"]" }), "5m")).toBeUndefined();
+    expect(marketMetadataFromGammaMarket(gammaMarket({ outcomePrices: "[null,\"0.46\"]" }), "5m")).toBeUndefined();
+    expect(marketMetadataFromGammaMarket(gammaMarket({ outcomePrices: "[\"\",\"0.46\"]" }), "5m")).toBeUndefined();
+    expect(marketMetadataFromGammaMarket(gammaMarket({ outcomePrices: "[false,\"0.46\"]" }), "5m")).toBeUndefined();
   });
 
   it("skips markets with invalid start or end dates", () => {

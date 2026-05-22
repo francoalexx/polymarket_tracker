@@ -169,9 +169,9 @@ export function marketMetadataFromGammaMarket(market: GammaMarket, marketType: M
 
   const outcomes = readJsonArray(market.outcomes).map(String);
   const tokenIds = readJsonArray(market.clobTokenIds ?? "[]").map(String);
-  const prices = readJsonArray(market.outcomePrices).map((price) => Number(price));
+  const prices = readJsonArray(market.outcomePrices).map(parsePrice);
   if (outcomes.length === 0 || outcomes.length !== tokenIds.length) return undefined;
-  if (prices.length !== outcomes.length || prices.some((price) => !Number.isFinite(price))) return undefined;
+  if (prices.length !== outcomes.length || prices.some((price) => price === undefined)) return undefined;
 
   const startValue = market.eventStartTime ?? getStartIsoFromSlug(market.slug) ?? market.startDate;
   if (!startValue || !market.endDate) return undefined;
@@ -204,7 +204,21 @@ function readJsonArray(value: string): unknown[] {
   }
 }
 
+function parsePrice(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+
+  const price = Number(value);
+  return Number.isFinite(price) ? price : undefined;
+}
+
 function getStartIsoFromSlug(slug: string): string | undefined {
   const match = slug.match(/-(\d+)$/);
-  return match ? new Date(Number(match[1]) * 1000).toISOString() : undefined;
+  if (!match) return undefined;
+
+  const timestamp = Number(match[1]);
+  if (!Number.isFinite(timestamp)) return undefined;
+
+  const date = new Date(timestamp * 1000);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
 }
