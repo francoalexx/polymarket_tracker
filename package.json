@@ -8,6 +8,7 @@
     "server:dev": "tsx watch server/index.ts",
     "client:dev": "vite --host 127.0.0.1 --port 5173",
     "scan:candidates": "tsx scripts/scanCandidates.ts",
+    "scan:latency": "tsx scripts/diagnoseLatency.ts",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run"
   },
