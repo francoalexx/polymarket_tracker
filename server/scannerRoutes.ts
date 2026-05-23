@@ -3,6 +3,8 @@ import type { ExecutionLogEntry, PreparedTradeTicket, ScannerSnapshot } from "..
 import type { ScannerService } from "./scannerService";
 import { PythonTradingProvider, executionFromProviderResponse, type TradingProvider } from "./tradingProvider";
 
+const SCANNER_STREAM_HEARTBEAT_MS = 15_000;
+
 export function scannerEventPayload(snapshot: ScannerSnapshot): string {
   return `event: scanner_snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`;
 }
@@ -21,8 +23,14 @@ export function registerScannerRoutes(
     const unsubscribe = scanner.subscribe((snapshot) => {
       response.write(scannerEventPayload(snapshot));
     });
+    const heartbeat = setInterval(() => {
+      response.write(": heartbeat\n\n");
+    }, SCANNER_STREAM_HEARTBEAT_MS);
 
-    request.on("close", unsubscribe);
+    request.on("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
   });
 
   app.get("/api/candidates", (_request, response) => {

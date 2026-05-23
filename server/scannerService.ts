@@ -40,6 +40,8 @@ const MAX_LATENCY_SAMPLES = 100;
 const MAX_CANDIDATES = 50;
 const MAX_TICKETS = 50;
 const MAX_EXECUTIONS = 100;
+const MAX_HISTORY_EVALUATIONS = 12;
+const HISTORY_EVALUATION_CONCURRENCY = 6;
 const HISTORY_CACHE_SECONDS = 5 * 60;
 const WINNER_LOOKUP_CONCURRENCY = 4;
 
@@ -144,6 +146,15 @@ export class ScannerService {
         lookbackMarkets: latency.activeMarketType === "5m" ? 8 : 4
       });
       const trades = await this.client.getTradesByMarkets(markets.map((market) => market.conditionId));
+      this.snapshot = {
+        ...this.snapshot,
+        status: "live",
+        message: `Evaluating BTC ${latency.activeMarketType} live signals`,
+        receivedAt: Date.now(),
+        latency
+      };
+      this.notify();
+
       const candidates = await this.promoteCandidates(markets, trades);
 
       this.snapshot = {
@@ -185,7 +196,13 @@ export class ScannerService {
       tradesByWalletAndMarket.set(wallet, walletTrades);
     }
 
-    const candidates: CandidateFeedItem[] = [];
+    const queuedSignals: Array<{
+      wallet: string;
+      market: MarketMetadata;
+      signal: NonNullable<ReturnType<typeof summarizeLiveWallet>>;
+      isActionable: boolean;
+      cooldownKey: SignalCooldownKey;
+    }> = [];
 
     for (const [wallet, tradesByMarket] of tradesByWalletAndMarket) {
       for (const [conditionId, walletTrades] of tradesByMarket) {
@@ -200,45 +217,60 @@ export class ScannerService {
         const cooldownKey: SignalCooldownKey = { wallet, conditionId, kind };
         if (isActionable && this.isCoolingDown(cooldownKey, now)) continue;
 
-        const history = await this.summarizeHistory(wallet, walletTrades);
-        const strictPass = passesStrictHistory(history);
-        if (!strictPass) continue;
-
-        if (isActionable) {
-          this.markCooldown(cooldownKey, now);
-        }
-
-        candidates.push({
-          wallet,
-          name: signal.name,
-          source: signal.source,
-          marketType: market.marketType,
-          outcome: signal.outcome,
-          recommendation: signal.recommendation,
-          score: history.copyabilityScore,
-          lastTradeAgeSeconds: signal.latestTradeAgeSeconds,
-          latencySeconds: signal.latencySeconds,
-          strictPass,
-          reason: signal.reason,
-          signal
-        });
-
-        if (signal.recommendation === "prepare_entry") {
-          this.addTicket(
-            buildEntryTicket({
-              wallet,
-              market,
-              outcome: signal.outcome,
-              asset: signal.asset,
-              observedPrice: signal.observedPrice,
-              candidateTradeId: signal.candidateTradeId,
-              now,
-              config: this.config
-            })
-          );
-        }
+        queuedSignals.push({ wallet, market, signal, isActionable, cooldownKey });
       }
     }
+
+    const candidates: CandidateFeedItem[] = [];
+    const signalsToEvaluate = queuedSignals
+      .sort((left, right) => signalPriority(right) - signalPriority(left))
+      .slice(0, MAX_HISTORY_EVALUATIONS);
+
+    await mapWithConcurrency(signalsToEvaluate, HISTORY_EVALUATION_CONCURRENCY, async ({ wallet, market, signal, isActionable, cooldownKey }) => {
+      let history: CandidateSummary;
+      try {
+        history = await this.summarizeHistory(wallet, tradesByWalletAndMarket.get(wallet)?.get(market.conditionId) ?? []);
+      } catch {
+        return;
+      }
+
+      const strictPass = passesStrictHistory(history);
+      if (!strictPass) return;
+
+      if (isActionable) {
+        this.markCooldown(cooldownKey, now);
+      }
+
+      candidates.push({
+        wallet,
+        name: signal.name,
+        source: signal.source,
+        marketType: market.marketType,
+        outcome: signal.outcome,
+        recommendation: signal.recommendation,
+        score: history.copyabilityScore,
+        lastTradeAgeSeconds: signal.latestTradeAgeSeconds,
+        latencySeconds: signal.latencySeconds,
+        strictPass,
+        reason: signal.reason,
+        signal
+      });
+
+      if (signal.recommendation === "prepare_entry") {
+        this.addTicket(
+          buildEntryTicket({
+            wallet,
+            market,
+            outcome: signal.outcome,
+            asset: signal.asset,
+            observedPrice: signal.observedPrice,
+            candidateTradeId: signal.candidateTradeId,
+            now,
+            config: this.config
+          })
+        );
+      }
+    });
 
     return candidates.sort((left, right) => right.score - left.score || left.latencySeconds - right.latencySeconds).slice(0, MAX_CANDIDATES);
   }
@@ -361,6 +393,16 @@ function getWinningOutcome(market: Pick<GammaMarket, "closed" | "outcomes" | "ou
 
   const winningIndex = prices.findIndex((price) => price === maxPrice);
   return outcomes[winningIndex];
+}
+
+function signalPriority(input: {
+  signal: NonNullable<ReturnType<typeof summarizeLiveWallet>>;
+  isActionable: boolean;
+}): number {
+  const actionableBoost = input.isActionable ? 1_000_000 : 0;
+  const sizeBoost = Math.min(input.signal.liveTradeUsdc, 10_000);
+  const recencyPenalty = input.signal.latestTradeAgeSeconds * 10;
+  return actionableBoost + sizeBoost - recencyPenalty;
 }
 
 function readJsonArray(value: string): unknown[] {

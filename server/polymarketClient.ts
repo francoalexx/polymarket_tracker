@@ -6,6 +6,8 @@ const GAMMA_API = "https://gamma-api.polymarket.com";
 const MAX_ACTIVITY_OFFSET = 3000;
 const ACTIVITY_LIMIT = 500;
 const MIN_ACTIVITY_SLICE_SECONDS = 300;
+const FETCH_TIMEOUT_MS = 8_000;
+const ACTIVITY_RANGE_TIMEOUT_MS = 12_000;
 
 export class PolymarketClient {
   async getPositions(wallet: string): Promise<PositionLeg[]> {
@@ -30,14 +32,26 @@ export class PolymarketClient {
   }
 
   async getActivityRange(wallet: string, start: number, end: number): Promise<ActivityTrade[]> {
-    const trades = await this.getActivityRangePageable(wallet, start, end);
-    const deduped = new Map<string, ActivityTrade>();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), ACTIVITY_RANGE_TIMEOUT_MS);
 
-    for (const trade of trades) {
-      deduped.set(getActivityId(trade), trade);
+    try {
+      const trades = await this.getActivityRangePageable(wallet, start, end, controller.signal);
+      const deduped = new Map<string, ActivityTrade>();
+
+      for (const trade of trades) {
+        deduped.set(getActivityId(trade), trade);
+      }
+
+      return Array.from(deduped.values()).sort((a, b) => a.timestamp - b.timestamp);
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(`Polymarket activity range request timed out after ${ACTIVITY_RANGE_TIMEOUT_MS / 1000}s for ${wallet}`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    return Array.from(deduped.values()).sort((a, b) => a.timestamp - b.timestamp);
   }
 
   async getLeaderboardTraders(options: {
@@ -106,11 +120,11 @@ export class PolymarketClient {
     return readList<ActivityTrade>(await fetchJson(url));
   }
 
-  private async getActivityRangePageable(wallet: string, start: number, end: number): Promise<ActivityTrade[]> {
+  private async getActivityRangePageable(wallet: string, start: number, end: number, signal?: AbortSignal): Promise<ActivityTrade[]> {
     const rows: ActivityTrade[] = [];
 
     for (let offset = 0; offset <= MAX_ACTIVITY_OFFSET; offset += ACTIVITY_LIMIT) {
-      const page = await this.getActivityPage(wallet, start, end, offset);
+      const page = await this.getActivityPage(wallet, start, end, offset, signal);
       rows.push(...page);
       if (page.length < ACTIVITY_LIMIT) return rows;
     }
@@ -120,12 +134,12 @@ export class PolymarketClient {
     }
 
     const midpoint = Math.floor((start + end) / 2);
-    const left = await this.getActivityRangePageable(wallet, start, midpoint);
-    const right = await this.getActivityRangePageable(wallet, midpoint + 1, end);
+    const left = await this.getActivityRangePageable(wallet, start, midpoint, signal);
+    const right = await this.getActivityRangePageable(wallet, midpoint + 1, end, signal);
     return [...left, ...right];
   }
 
-  private async getActivityPage(wallet: string, start: number, end: number, offset: number): Promise<ActivityTrade[]> {
+  private async getActivityPage(wallet: string, start: number, end: number, offset: number, signal?: AbortSignal): Promise<ActivityTrade[]> {
     const url = new URL("/activity", DATA_API);
     url.searchParams.set("user", wallet);
     url.searchParams.set("limit", String(ACTIVITY_LIMIT));
@@ -135,17 +149,36 @@ export class PolymarketClient {
     url.searchParams.set("end", String(end));
     url.searchParams.set("sortDirection", "ASC");
 
-    return readList<ActivityTrade>(await fetchJson(url));
+    return readList<ActivityTrade>(await fetchJson(url, signal));
   }
 }
 
-async function fetchJson(url: URL): Promise<unknown> {
-  const response = await fetch(url, {
-    headers: {
-      accept: "application/json",
-      "user-agent": "bonereaper-polymarket-tracker/0.1"
+async function fetchJson(url: URL, outerSignal?: AbortSignal): Promise<unknown> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const timeout = setTimeout(abort, FETCH_TIMEOUT_MS);
+  let response: Response;
+
+  if (outerSignal?.aborted) controller.abort();
+  outerSignal?.addEventListener("abort", abort, { once: true });
+
+  try {
+    response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        accept: "application/json",
+        "user-agent": "bonereaper-polymarket-tracker/0.1"
+      }
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`Polymarket API request timed out after ${FETCH_TIMEOUT_MS / 1000}s: ${url.toString()}`);
     }
-  });
+    throw error;
+  } finally {
+    outerSignal?.removeEventListener("abort", abort);
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     throw new Error(`Polymarket API ${response.status}: ${await response.text()}`);
