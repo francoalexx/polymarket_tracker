@@ -17,16 +17,17 @@ const FIFTEEN_MINUTE_RE = /\b15\s*(m|min|minute)s?\b|-(15m)-/i;
 const EPSILON = 1e-6;
 
 export const DEFAULT_COPY_TRADER_CONFIG: CopyTraderConfig = {
-  primaryMarketType: "5m",
+  primaryMarketType: "15m",
   fallbackMarketType: "15m",
   latencyThresholdSeconds: 8,
   activeWithinSeconds: 20 * 60,
   earlyEntrySeconds: 90,
-  minLiveTradeUsdc: 5,
+  minLiveTradeUsdc: 100,
   maxEntryPrice: 0.85,
   repeatCooldownSeconds: 240,
   defaultEntrySpendUsdc: 10,
-  maxSlippageCents: 5
+  maxSlippageCents: 5,
+  minHistoryVolume: 100
 };
 
 export function isBtcShortTermTrade(trade: Pick<ActivityTrade, "title" | "slug">, marketType?: MarketType): boolean {
@@ -54,8 +55,8 @@ export function getLatencyMode(samples: Pick<LatencySample, "latencySeconds">[],
   };
 }
 
-export function passesStrictHistory(summary: CandidateSummary): boolean {
-  return summary.totalMarkets >= 20 && summary.totalPnl > 0 && summary.winRate >= 0.6 && summary.oneSidedRate >= 0.8;
+export function passesStrictHistory(summary: CandidateSummary, minHistoryVolume = 100): boolean {
+  return summary.totalMarkets >= 20 && summary.totalPnl > 0 && summary.winRate >= 0.6 && summary.oneSidedRate >= 0.8 && summary.totalBuy >= minHistoryVolume;
 }
 
 export function summarizeLiveWallet(

@@ -44,6 +44,9 @@ const MAX_HISTORY_EVALUATIONS = 12;
 const HISTORY_EVALUATION_CONCURRENCY = 6;
 const HISTORY_CACHE_SECONDS = 5 * 60;
 const WINNER_LOOKUP_CONCURRENCY = 4;
+const LEADERBOARD_REFRESH_MS = 15 * 60 * 1000;
+const LEADERBOARD_LIMIT = 100;
+const LEADERBOARD_PREWARM_COUNT = 20;
 
 export class ScannerService {
   private readonly client: ScannerClient;
@@ -57,6 +60,8 @@ export class ScannerService {
   private readonly historySummaryCache = new Map<string, { expiresAt: number; summary: Promise<CandidateSummary> }>();
   private readonly winnerCache = new Map<string, string>();
   private readonly pendingWinnerLookups = new Map<string, Promise<string | undefined>>();
+  private readonly trustedWallets = new Map<string, { vol: number; pnl: number; rank: string; name?: string }>();
+  private leaderboardTimer?: NodeJS.Timeout;
   private snapshot: ScannerSnapshot;
   private timer?: NodeJS.Timeout;
   private inFlightScan?: Promise<void>;
@@ -80,14 +85,53 @@ export class ScannerService {
 
   start(): void {
     if (this.timer) return;
+    void this.refreshLeaderboard();
     void this.scanOnce();
     this.timer = setInterval(() => void this.scanOnce(), this.intervalMs);
+    this.leaderboardTimer = setInterval(() => void this.refreshLeaderboard(), LEADERBOARD_REFRESH_MS);
   }
 
   stop(): void {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;
+    }
+    if (this.leaderboardTimer) {
+      clearInterval(this.leaderboardTimer);
+      this.leaderboardTimer = undefined;
+    }
+  }
+
+  private async refreshLeaderboard(): Promise<void> {
+    try {
+      const traders = await this.client.getLeaderboardTraders({
+        category: "CRYPTO",
+        timePeriod: "WEEK",
+        orderBy: "PNL",
+        limit: LEADERBOARD_LIMIT
+      });
+
+      this.trustedWallets.clear();
+      for (const trader of traders) {
+        this.trustedWallets.set(trader.proxyWallet.trim().toLowerCase(), {
+          vol: trader.vol,
+          pnl: trader.pnl,
+          rank: trader.rank,
+          name: trader.userName
+        });
+      }
+
+      const now = this.now();
+      for (const trader of traders.slice(0, LEADERBOARD_PREWARM_COUNT)) {
+        const wallet = trader.proxyWallet.trim().toLowerCase();
+        if (!this.historySummaryCache.has(wallet)) {
+          const summary = this.buildHistorySummary(wallet, now);
+          this.historySummaryCache.set(wallet, { expiresAt: now + HISTORY_CACHE_SECONDS, summary });
+          summary.catch(() => this.historySummaryCache.delete(wallet));
+        }
+      }
+    } catch {
+      // leaderboard fetch failures are non-fatal — retry next interval
     }
   }
 
@@ -234,17 +278,22 @@ export class ScannerService {
         return;
       }
 
-      const strictPass = passesStrictHistory(history);
+      const strictPass = passesStrictHistory(history, this.config.minHistoryVolume);
       if (!strictPass) return;
 
       if (isActionable) {
         this.markCooldown(cooldownKey, now);
       }
 
+      const trusted = this.trustedWallets.get(signal.wallet.trim().toLowerCase());
+      const enrichedReason = trusted
+        ? `${signal.reason} | leaderboard #${trusted.rank} vol=$${trusted.vol.toFixed(0)} pnl=$${trusted.pnl.toFixed(0)}`
+        : signal.reason;
+
       candidates.push({
         wallet,
-        name: signal.name,
-        source: signal.source,
+        name: trusted?.name ?? signal.name,
+        source: trusted ? "both" : signal.source,
         marketType: market.marketType,
         outcome: signal.outcome,
         recommendation: signal.recommendation,
@@ -252,7 +301,7 @@ export class ScannerService {
         lastTradeAgeSeconds: signal.latestTradeAgeSeconds,
         latencySeconds: signal.latencySeconds,
         strictPass,
-        reason: signal.reason,
+        reason: enrichedReason,
         signal
       });
 

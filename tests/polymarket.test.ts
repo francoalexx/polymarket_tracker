@@ -18,6 +18,7 @@ import {
 } from "../server/tradingProvider";
 import { analyzeCandidate, isBtcFiveMinuteTrade } from "../shared/candidateScanner";
 import {
+  DEFAULT_COPY_TRADER_CONFIG,
   buildEntryTicket,
   buildExitTicket,
   getLatencyMode,
@@ -307,7 +308,8 @@ describe("hybrid copy trader pure logic", () => {
     maxEntryPrice: 0.85,
     repeatCooldownSeconds: 240,
     defaultEntrySpendUsdc: 10,
-    maxSlippageCents: 5
+    maxSlippageCents: 5,
+    minHistoryVolume: 100
   };
 
   it("classifies BTC 5m and BTC 15m trades without matching ETH", () => {
@@ -358,7 +360,7 @@ describe("hybrid copy trader pure logic", () => {
           outcome: "Up",
           asset: "up-token",
           size: 30,
-          usdcSize: 16.2,
+          usdcSize: 108,
           price: 0.54
         })
       ],
@@ -603,7 +605,7 @@ describe("scanner service", () => {
             outcome: "Up",
             asset: "up-token",
             size: 30,
-            usdcSize: 16.2,
+            usdcSize: 108,
             price: 0.54
           })
         ],
@@ -667,7 +669,7 @@ describe("scanner service", () => {
           outcome: "Up",
           asset: "up-token",
           size: 30,
-          usdcSize: 16.2,
+          usdcSize: 108,
           price: 0.54
         })
       ]),
@@ -699,7 +701,7 @@ describe("scanner service", () => {
         outcome: "Up",
         asset: "up-token",
         size: 30,
-        usdcSize: 16.2,
+        usdcSize: 108,
         price: 0.54
       })
     ];
@@ -713,7 +715,7 @@ describe("scanner service", () => {
         outcome: "Up",
         asset: "up-token",
         size: 10,
-        usdcSize: 4,
+        usdcSize: 6,
         price: 0.4
       })
     );
@@ -752,7 +754,7 @@ describe("scanner service", () => {
         outcome: "Up",
         asset: "up-token",
         size: 30,
-        usdcSize: 16.2,
+        usdcSize: 108,
         price: 0.54
       })
     ];
@@ -774,7 +776,7 @@ describe("scanner service", () => {
         outcome: "Up",
         asset: "up-token",
         size: 10,
-        usdcSize: 4,
+        usdcSize: 6,
         price: 0.4
       })
     );
@@ -793,7 +795,7 @@ describe("scanner service", () => {
             outcome: "Up",
             asset: "up-token",
             size: 30,
-            usdcSize: 16.2,
+            usdcSize: 108,
             price: 0.54
           })
         ],
@@ -835,7 +837,7 @@ describe("scanner service", () => {
         outcome: "Up",
         asset: "up-token",
         size: 10,
-        usdcSize: 4,
+        usdcSize: 6,
         price: 0.4
       })
     );
@@ -866,7 +868,7 @@ describe("scanner service", () => {
             outcome: "Up",
             asset: "up-token",
             size: 30,
-            usdcSize: 16.2,
+            usdcSize: 108,
             price: 0.54
           })
         ],
@@ -902,7 +904,7 @@ describe("scanner service", () => {
         outcome: "Up",
         asset: "up-token",
         size: 30,
-        usdcSize: 16.2,
+        usdcSize: 108,
         price: 0.54
       })
     ];
@@ -1352,6 +1354,11 @@ async function scannerWithTicket(ticketOverrides: Partial<PreparedTradeTicket> =
   };
   const service = new ScannerService({
     now: () => 4020,
+    config: {
+      ...DEFAULT_COPY_TRADER_CONFIG,
+      minLiveTradeUsdc: 10,
+      minHistoryVolume: 0
+    },
     client: scannerClient(
       [market],
       [
@@ -1364,7 +1371,7 @@ async function scannerWithTicket(ticketOverrides: Partial<PreparedTradeTicket> =
           outcome: "Up",
           asset: "up-token",
           size: 30,
-          usdcSize: 16.2,
+          usdcSize: 108,
           price: 0.54
         })
       ]

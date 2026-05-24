@@ -147,6 +147,7 @@ export type CopyTraderConfig = {
   repeatCooldownSeconds: number;
   defaultEntrySpendUsdc: number;
   maxSlippageCents: number;
+  minHistoryVolume: number;
 };
 
 export type MarketOutcomeMetadata = {
