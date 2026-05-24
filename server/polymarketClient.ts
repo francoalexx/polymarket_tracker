@@ -1,4 +1,5 @@
 import { getActivityId } from "../shared/polymarket";
+import { readJsonArray } from "../shared/utils";
 import type { ActivityTrade, GammaEvent, GammaMarket, LeaderboardTrader, MarketMetadata, MarketType, PositionLeg } from "../shared/types";
 
 const DATA_API = "https://data-api.polymarket.com";
@@ -226,15 +227,6 @@ export function marketMetadataFromGammaMarket(market: GammaMarket, marketType: M
     minTickSize,
     negRisk: Boolean(market.negRisk)
   };
-}
-
-function readJsonArray(value: string): unknown[] {
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
 }
 
 function parsePrice(value: unknown): number | undefined {

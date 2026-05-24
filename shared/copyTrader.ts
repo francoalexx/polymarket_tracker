@@ -27,7 +27,8 @@ export const DEFAULT_COPY_TRADER_CONFIG: CopyTraderConfig = {
   repeatCooldownSeconds: 240,
   defaultEntrySpendUsdc: 10,
   maxSlippageCents: 5,
-  minHistoryVolume: 100
+  minHistoryVolume: 100,
+  minMarketRemainingSeconds: 180
 };
 
 export function isBtcShortTermTrade(trade: Pick<ActivityTrade, "title" | "slug">, marketType?: MarketType): boolean {

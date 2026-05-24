@@ -1,5 +1,6 @@
 import { analyzeCandidate, isBtcFiveMinuteTrade } from "../shared/candidateScanner";
 import type { ActivityTrade, GammaEvent, GammaMarket, LeaderboardTrader } from "../shared/types";
+import { getWinningOutcome, mapWithConcurrency, readJsonArray } from "../shared/utils";
 
 const DATA_API = "https://data-api.polymarket.com";
 const GAMMA_API = "https://gamma-api.polymarket.com";
@@ -253,7 +254,7 @@ async function loadWinners(activity: ActivityTrade[], winners: Map<string, strin
     (trade) => !winners.has(trade.conditionId)
   );
 
-  await mapConcurrent(missing, 8, async (trade) => {
+  await mapWithConcurrency(missing, 8, async (trade) => {
     const market = await getGammaMarketBySlug(trade.slug);
     const winner = market ? getWinningOutcome(market) : undefined;
     if (winner) winners.set(trade.conditionId, winner);
@@ -265,16 +266,6 @@ async function getGammaMarketBySlug(slug: string): Promise<GammaMarket | undefin
   url.searchParams.set("slug", slug);
   const [event] = await fetchList<GammaEvent>(url);
   return event?.markets?.find((market) => market.slug === slug);
-}
-
-function getWinningOutcome(market: GammaMarket): string | undefined {
-  if (!market.closed) return undefined;
-  const outcomes = readJsonArray(market.outcomes);
-  const prices = readJsonArray(market.outcomePrices).map((price) => Number(price));
-  if (outcomes.length === 0 || outcomes.length !== prices.length) return undefined;
-
-  const winningIndex = prices.findIndex((price) => price === Math.max(...prices));
-  return prices[winningIndex] >= 0.99 ? String(outcomes[winningIndex]) : undefined;
 }
 
 async function fetchList<T>(url: URL): Promise<T[]> {
@@ -346,15 +337,6 @@ function renderResults(rows: Array<{ live: LiveCandidate; summary: ReturnType<ty
   return lines.join("\n");
 }
 
-function readJsonArray(value: string): unknown[] {
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
 function percent(value: number): string {
   return `${(value * 100).toFixed(2)}%`;
 }
@@ -365,22 +347,6 @@ function money(value: number): string {
 
 function round(value: number): number {
   return Math.round(value * 10000) / 10000;
-}
-
-async function mapConcurrent<T, R>(items: T[], concurrency: number, mapper: (item: T, index: number) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let nextIndex = 0;
-
-  async function worker(): Promise<void> {
-    while (nextIndex < items.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      results[index] = await mapper(items[index], index);
-    }
-  }
-
-  await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
-  return results;
 }
 
 function sleep(ms: number): Promise<void> {

@@ -24,24 +24,32 @@ Design doc specifies a "trusted lane" (weekly CRYPTO leaderboard + live market t
 
 **Fix**: Wire leaderboard fetch into ScannerService to seed a persistent wallet watchlist.
 
-## P2 — Candidates vanish between scan cycles
+## P2 — Candidates vanish between scan cycles ✅ FIXED
 
 `server/scannerService.ts:174-275` — `promoteCandidates` rebuilds the candidate list from scratch every scan. If a wallet is active in scan N but not N+1, it disappears instantly.
 
-**Fix**: Persist candidates with a TTL-based staleness model.
+**Fix (ab00ab9)**: Candidates persist for 30s after last seen. Stale candidates show as `watch` recommendation. Merged with fresh candidates each scan.
 
-## P2 — 15m lookback is shallow
+## P2 — 15m lookback is shallow ✅ FIXED
 
 `server/scannerService.ts:146` — When switching to 15m, `lookbackMarkets` is only 4 (vs 8 for 5m). Four 15m markets = 60 min of coverage but only 4 discrete events, limiting wallet discovery precisely when the system is already degraded.
 
-## P3 — No remaining market time check
+**Fix (ab00ab9)**: Hardcoded `lookbackMarkets: 8` regardless of market type (120 min coverage for 15m).
+
+## P3 — No remaining market time check ✅ FIXED
 
 Scanner treats all active markets equally — a 15m market with 1 minute left is weighted the same as one with 14 minutes left. "Early entry" into a nearly-resolved market is meaningless.
 
-## P3 — No leaderboard volume filter
+**Fix (ab00ab9)**: Added `minMarketRemainingSeconds` (default 180 = 3 min) to config. Markets with less time remaining are skipped in signal evaluation.
+
+## P3 — No leaderboard volume filter ✅ FIXED
 
 `analyzeCandidate` stores `leaderboardVol` in the summary but never uses it for filtering. A wallet with $10 total volume on the leaderboard gets the same consideration as one with $10,000.
 
-## P3 — Duplicate utility code
+**Fix (ab00ab9)**: `buildHistorySummary` now passes real leaderboard vol/pnl/rank to `analyzeCandidate`. `scoreCandidate` factors `leaderboardVol` using log-scale scoring (weight 5/100). $10K vol = 0.8, $100K = 1.0.
+
+## P3 — Duplicate utility code ✅ FIXED
 
 `readJsonArray`, `getWinningOutcome`, `mapWithConcurrency` are copy-pasted across 5+ files (`scannerService.ts`, `candidateScanner.ts`, `polymarketClient.ts`, `scanCandidates.ts`, `findLiveBtc5Wallet.ts`).
+
+**Fix (ab00ab9)**: Extracted into `shared/utils.ts`. All files now import from shared.

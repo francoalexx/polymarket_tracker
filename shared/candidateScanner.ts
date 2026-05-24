@@ -123,7 +123,7 @@ export function analyzeCandidate(
     oneSidedRate,
     holdThroughRate,
     averageFirstEntrySeconds: totalMarkets ? round(markets.reduce((total, market) => total + market.firstEntrySeconds, 0) / totalMarkets) : 0,
-    copyabilityScore: scoreCandidate({ winRate, earlyEntryRate, oneSidedRate, holdThroughRate, roi: totalBuy > 0 ? totalPnl / totalBuy : 0, totalMarkets }),
+    copyabilityScore: scoreCandidate({ winRate, earlyEntryRate, oneSidedRate, holdThroughRate, roi: totalBuy > 0 ? totalPnl / totalBuy : 0, totalMarkets, leaderboardVol: Number(trader.vol || 0) }),
     markets
   };
 }
@@ -196,14 +196,17 @@ function scoreCandidate(metrics: {
   holdThroughRate: number;
   roi: number;
   totalMarkets: number;
+  leaderboardVol: number;
 }): number {
   const roiScore = clamp((metrics.roi + 0.25) / 1.0, 0, 1);
+  const volScore = clamp(Math.log10(Math.max(1, metrics.leaderboardVol)) / 5, 0, 1);
   const score =
     metrics.winRate * 30 +
     metrics.earlyEntryRate * 25 +
     metrics.oneSidedRate * 20 +
     metrics.holdThroughRate * 15 +
-    roiScore * 10;
+    roiScore * 10 +
+    volScore * 5;
 
   return round(score);
 }

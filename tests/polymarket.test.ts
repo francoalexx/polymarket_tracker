@@ -309,7 +309,8 @@ describe("hybrid copy trader pure logic", () => {
     repeatCooldownSeconds: 240,
     defaultEntrySpendUsdc: 10,
     maxSlippageCents: 5,
-    minHistoryVolume: 100
+    minHistoryVolume: 100,
+    minMarketRemainingSeconds: 0
   };
 
   it("classifies BTC 5m and BTC 15m trades without matching ETH", () => {

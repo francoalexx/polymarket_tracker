@@ -19,6 +19,7 @@ import type {
   SignalCooldownKey,
   ScannerSnapshot
 } from "../shared/types";
+import { getWinningOutcome, mapWithConcurrency, readJsonArray } from "../shared/utils";
 import { PolymarketClient } from "./polymarketClient";
 
 type ScannerClient = Pick<
@@ -47,6 +48,7 @@ const WINNER_LOOKUP_CONCURRENCY = 4;
 const LEADERBOARD_REFRESH_MS = 15 * 60 * 1000;
 const LEADERBOARD_LIMIT = 100;
 const LEADERBOARD_PREWARM_COUNT = 20;
+const CANDIDATE_STALE_TTL_SECONDS = 30;
 
 export class ScannerService {
   private readonly client: ScannerClient;
@@ -61,6 +63,7 @@ export class ScannerService {
   private readonly winnerCache = new Map<string, string>();
   private readonly pendingWinnerLookups = new Map<string, Promise<string | undefined>>();
   private readonly trustedWallets = new Map<string, { vol: number; pnl: number; rank: string; name?: string }>();
+  private readonly previousCandidates = new Map<string, CandidateFeedItem & { lastSeenAt: number }>();
   private leaderboardTimer?: NodeJS.Timeout;
   private snapshot: ScannerSnapshot;
   private timer?: NodeJS.Timeout;
@@ -187,7 +190,7 @@ export class ScannerService {
       const markets = await this.client.getShortTermBtcMarkets({
         marketType: latency.activeMarketType,
         now: this.now(),
-        lookbackMarkets: latency.activeMarketType === "5m" ? 8 : 4
+        lookbackMarkets: 8
       });
       const trades = await this.client.getTradesByMarkets(markets.map((market) => market.conditionId));
       this.snapshot = {
@@ -252,6 +255,7 @@ export class ScannerService {
       for (const [conditionId, walletTrades] of tradesByMarket) {
         const market = marketByCondition.get(conditionId);
         if (!market) continue;
+        if (market.endTimestamp - now < this.config.minMarketRemainingSeconds) continue;
 
         const signal = summarizeLiveWallet(wallet, walletTrades, market, now, this.config);
         if (!signal) continue;
@@ -321,7 +325,28 @@ export class ScannerService {
       }
     });
 
-    return candidates.sort((left, right) => right.score - left.score || left.latencySeconds - right.latencySeconds).slice(0, MAX_CANDIDATES);
+    const scanNow = this.now();
+    const staleCutoff = scanNow - CANDIDATE_STALE_TTL_SECONDS;
+    const keyedFresh = new Map<string, CandidateFeedItem>();
+
+    for (const candidate of candidates) {
+      const key = candidate.wallet.trim().toLowerCase();
+      keyedFresh.set(key, candidate);
+      this.previousCandidates.set(key, { ...candidate, lastSeenAt: scanNow });
+    }
+
+    for (const [key, previous] of this.previousCandidates) {
+      if (keyedFresh.has(key)) continue;
+      if (previous.lastSeenAt < staleCutoff) {
+        this.previousCandidates.delete(key);
+        continue;
+      }
+      keyedFresh.set(key, { ...previous, recommendation: "watch" });
+    }
+
+    return Array.from(keyedFresh.values())
+      .sort((left, right) => right.score - left.score || left.latencySeconds - right.latencySeconds)
+      .slice(0, MAX_CANDIDATES);
   }
 
   private async summarizeHistory(wallet: string, signalTrades: ActivityTrade[]): Promise<CandidateSummary> {
@@ -343,11 +368,14 @@ export class ScannerService {
     const activity = await this.client.getActivityRange(wallet, start, end);
     const relevantActivity = activity.filter(isBtcShortTermHistoryTrade);
     const winnerByCondition = await this.loadWinners(relevantActivity);
+    const trusted = this.trustedWallets.get(wallet.trim().toLowerCase());
 
-    return analyzeCandidate({ proxyWallet: wallet, rank: "", pnl: 0, vol: 0 }, relevantActivity, winnerByCondition, {
-      marketTypes: ["5m", "15m"],
-      earlyEntrySeconds: this.config.earlyEntrySeconds
-    });
+    return analyzeCandidate(
+      { proxyWallet: wallet, rank: trusted?.rank ?? "", pnl: trusted?.pnl ?? 0, vol: trusted?.vol ?? 0 },
+      relevantActivity,
+      winnerByCondition,
+      { marketTypes: ["5m", "15m"], earlyEntrySeconds: this.config.earlyEntrySeconds }
+    );
   }
 
   private async loadWinners(activity: ActivityTrade[]): Promise<Map<string, string>> {
@@ -430,20 +458,6 @@ export class ScannerService {
   }
 }
 
-function getWinningOutcome(market: Pick<GammaMarket, "closed" | "outcomes" | "outcomePrices">): string | undefined {
-  if (!market.closed) return undefined;
-
-  const outcomes = readJsonArray(market.outcomes).map(String);
-  const prices = readJsonArray(market.outcomePrices).map((price) => Number(price));
-  if (outcomes.length === 0 || outcomes.length !== prices.length) return undefined;
-
-  const maxPrice = Math.max(...prices);
-  if (!Number.isFinite(maxPrice) || maxPrice < 0.99) return undefined;
-
-  const winningIndex = prices.findIndex((price) => price === maxPrice);
-  return outcomes[winningIndex];
-}
-
 function signalPriority(input: {
   signal: NonNullable<ReturnType<typeof summarizeLiveWallet>>;
   isActionable: boolean;
@@ -454,30 +468,6 @@ function signalPriority(input: {
   return actionableBoost + sizeBoost - recencyPenalty;
 }
 
-function readJsonArray(value: string): unknown[] {
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
 function cooldownKey(key: SignalCooldownKey): string {
   return `${key.kind}:${key.wallet}:${key.conditionId}`;
-}
-
-async function mapWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>): Promise<void> {
-  let nextIndex = 0;
-  const workerCount = Math.min(concurrency, items.length);
-
-  await Promise.all(
-    Array.from({ length: workerCount }, async () => {
-      while (nextIndex < items.length) {
-        const item = items[nextIndex];
-        nextIndex += 1;
-        await worker(item);
-      }
-    })
-  );
 }

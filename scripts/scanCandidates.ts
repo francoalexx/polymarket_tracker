@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { analyzeCandidate, isBtcFiveMinuteTrade, type CandidateSummary } from "../shared/candidateScanner";
 import type { ActivityTrade, GammaMarket } from "../shared/types";
+import { getWinningOutcome, mapWithConcurrency, readJsonArray } from "../shared/utils";
 import { PolymarketClient } from "../server/polymarketClient";
 
 type ScannerConfig = {
@@ -41,7 +42,7 @@ async function main(): Promise<void> {
     limit: config.limit
   });
 
-  const summaries = await mapConcurrent(leaderboard, config.concurrency, async (trader, index) => {
+  const summaries = await mapWithConcurrency(leaderboard, config.concurrency, async (trader, index) => {
     console.log(`[${index + 1}/${leaderboard.length}] ${trader.userName ?? trader.proxyWallet}`);
     const activity = await client.getActivityRange(trader.proxyWallet, start, end);
     const btc5 = activity.filter(isBtcFiveMinuteTrade);
@@ -93,42 +94,6 @@ function getMarket(slug: string): Promise<GammaMarket | undefined> {
   const promise = client.getGammaMarketBySlug(slug);
   marketCache.set(slug, promise);
   return promise;
-}
-
-function getWinningOutcome(market: GammaMarket): string | undefined {
-  if (!market.closed) return undefined;
-
-  const outcomes = readJsonArray(market.outcomes);
-  const prices = readJsonArray(market.outcomePrices).map((price) => Number(price));
-  if (outcomes.length === 0 || outcomes.length !== prices.length) return undefined;
-
-  const winningIndex = prices.findIndex((price) => price === Math.max(...prices));
-  return prices[winningIndex] >= 0.99 ? String(outcomes[winningIndex]) : undefined;
-}
-
-function readJsonArray(value: string): unknown[] {
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-async function mapConcurrent<T, R>(items: T[], concurrency: number, mapper: (item: T, index: number) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let nextIndex = 0;
-
-  async function worker(): Promise<void> {
-    while (nextIndex < items.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      results[index] = await mapper(items[index], index);
-    }
-  }
-
-  await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
-  return results;
 }
 
 function readConfig(args: string[]): ScannerConfig {
